@@ -5,17 +5,40 @@ const path = require("path");
 
 const FILE = path.join(__dirname, "..", "data", "agents.json");
 
+function ensureStorageReady() {
+  try {
+    const dir = path.dirname(FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    // Check if file exists; if not, create empty agents object
+    if (!fs.existsSync(FILE)) {
+      fs.writeFileSync(FILE, JSON.stringify({}, null, 2));
+    }
+  } catch (err) {
+    console.error("Error initializing agent storage:", err.response?.data || err.message || err);
+    throw err;
+  }
+}
+
 function load() {
   try {
+    ensureStorageReady();
     return JSON.parse(fs.readFileSync(FILE, "utf8"));
-  } catch (_) {
+  } catch (err) {
+    console.error("Error loading agents from file:", err.response?.data || err.message || err);
     return {};
   }
 }
 
 function saveAll(agents) {
-  fs.mkdirSync(path.dirname(FILE), { recursive: true });
-  fs.writeFileSync(FILE, JSON.stringify(agents, null, 2));
+  try {
+    ensureStorageReady();
+    fs.writeFileSync(FILE, JSON.stringify(agents, null, 2));
+  } catch (err) {
+    console.error("Error saving agents to file:", err.response?.data || err.message || err);
+    throw err;
+  }
 }
 
 function getAgent(waId) {
@@ -35,4 +58,4 @@ function isAuthorizedAdmin(waId) {
   return admins.includes(waId);
 }
 
-module.exports = { getAgent, registerAgent, isAuthorizedAdmin };
+module.exports = { getAgent, registerAgent, isAuthorizedAdmin, ensureStorageReady };
