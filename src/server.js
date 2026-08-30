@@ -2,11 +2,26 @@ require("dotenv").config();
 const express = require("express");
 const whatsapp = require("./whatsapp");
 const engine = require("./engine");
+const agentStore = require("./agentStore");
 
 const app = express();
 app.use(express.json());
 
+// Startup validation
+try {
+  agentStore.ensureStorageReady();
+  console.log("✅ Agent storage initialized successfully");
+} catch (err) {
+  console.error("❌ Failed to initialize agent storage:", err.message);
+  process.exit(1);
+}
+
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
+
+// Health endpoint for monitoring
+app.get("/health", (_req, res) => {
+  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+});
 
 // ---- Webhook verification (Meta requirement) ----
 app.get("/webhook", (req, res) => {
@@ -91,6 +106,12 @@ app.post("/webhook", async (req, res) => {
       seenMessageIds.add(raw.id);
 
       const waId = raw.from;
+      const rawText = raw.type === "text" ? raw.text?.body || "" : "";
+      
+      // Improved webhook logging
+      console.log("Incoming from:", waId);
+      console.log("Message:", rawText);
+
       await whatsapp.markRead(raw.id);
 
       const rl = isRateLimited(waId);
@@ -123,6 +144,10 @@ app.post("/webhook", async (req, res) => {
       }
 
       const replies = await engine.handleInboundMessage(waId, normalized);
+      
+      // Improved webhook logging
+      console.log("Replies:", replies);
+      
       for (const reply of replies) {
         await whatsapp.sendText(waId, reply);
       }
