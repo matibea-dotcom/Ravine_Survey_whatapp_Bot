@@ -77,6 +77,7 @@ function normalizeInboundMessage(raw) {
 app.post("/webhook", async (req, res) => {
   // Acknowledge immediately — WhatsApp expects a fast 200.
   res.sendStatus(200);
+  console.log("WEBHOOK RECEIVED:", JSON.stringify(req.body));
 
   try {
     const entry = req.body.entry?.[0];
