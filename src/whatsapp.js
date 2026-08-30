@@ -26,16 +26,21 @@ function chunk(text) {
 async function sendText(to, text) {
   const parts = chunk(text);
   for (const part of parts) {
-    await axios.post(
-      BASE_URL,
-      {
-        messaging_product: "whatsapp",
-        to,
-        type: "text",
-        text: { body: part, preview_url: false },
-      },
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
-    );
+    try {
+      await axios.post(
+        BASE_URL,
+        {
+          messaging_product: "whatsapp",
+          to,
+          type: "text",
+          text: { body: part, preview_url: false },
+        },
+        { headers: { Authorization: `Bearer ${TOKEN}` } }
+      );
+    } catch (err) {
+      console.error("Error sending WhatsApp message:", err.response?.data || err.message || err);
+      throw err; // Re-throw so caller knows it failed
+    }
   }
 }
 
@@ -47,8 +52,9 @@ async function markRead(messageId) {
       { messaging_product: "whatsapp", status: "read", message_id: messageId },
       { headers: { Authorization: `Bearer ${TOKEN}` } }
     );
-  } catch (_) {
-    // Non-critical — ignore failures.
+  } catch (err) {
+    // Non-critical — log but don't throw
+    console.warn("Warning: Failed to mark message as read:", err.response?.data || err.message || err);
   }
 }
 
