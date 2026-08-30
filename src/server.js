@@ -128,7 +128,7 @@ app.post("/webhook", async (req, res) => {
       }
     }
   } catch (err) {
-    console.error("Webhook handling error:", err);
+    console.error("Error:", err.response?.data || err.message || err);
   }
 });
 
