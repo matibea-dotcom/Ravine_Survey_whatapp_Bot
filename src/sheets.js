@@ -96,15 +96,22 @@ function flattenSubmission(submission) {
 }
 
 async function appendSubmission(submission) {
-  const sheets = await getClient();
-  await ensureHeader();
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_TAB}!A1`,
-    valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values: [flattenSubmission(submission)] },
-  });
+  try {
+    const sheets = await getClient();
+    await ensureHeader();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_TAB}!A1`,
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: [flattenSubmission(submission)] },
+    });
+  } catch (err) {
+    console.error(
+      "Sheets append failed:",
+      err.response?.data || err.stack || err
+    );
+  }
 }
 
 module.exports = { appendSubmission, COLUMNS };
