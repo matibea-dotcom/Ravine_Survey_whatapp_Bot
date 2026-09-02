@@ -25,6 +25,17 @@ async function getAgent(waId) {
   return map.get(waId) || null;
 }
 
+/**
+ * Startup pre-flight check — called once when the server boots (see
+ * server.js). Confirms the Agents Google Sheet tab is actually reachable
+ * (service account access, sheet ID, network) before the server starts
+ * accepting webhook traffic, so misconfiguration fails loudly at deploy
+ * time instead of silently on someone's first registration attempt.
+ */
+async function ensureStorageReady() {
+  await loadCache();
+}
+
 async function registerAgent(waId, profile) {
   const agent = { ...profile, waId, registeredAt: new Date().toISOString() };
   await sheets.appendAgent(agent);
@@ -38,4 +49,4 @@ function isAuthorizedAdmin(waId) {
   return admins.includes(waId);
 }
 
-module.exports = { getAgent, registerAgent, isAuthorizedAdmin };
+module.exports = { getAgent, registerAgent, isAuthorizedAdmin, ensureStorageReady };
