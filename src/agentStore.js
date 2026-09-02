@@ -1,56 +1,36 @@
-// Lightweight file-backed registry so registered agents survive a restart.
-// Swap for a real database table (or a Google Sheet "Agents" tab) at scale.
-const fs = require("fs");
-const path = require("path");
+// Agent registry — backed by a Google Sheets tab ("Agents" by default) so
+// registrations survive Render redeploys/restarts (Render's free tier has no
+// persistent disk; anything written to the local filesystem is wiped on every
+// new deploy or restart). A small in-memory cache avoids hitting the Sheets
+// API on every single message.
 
-const FILE = path.join(__dirname, "..", "data", "agents.json");
+const sheets = require("./sheets");
 
-function ensureStorageReady() {
-  try {
-    const dir = path.dirname(FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    // Check if file exists; if not, create empty agents object
-    if (!fs.existsSync(FILE)) {
-      fs.writeFileSync(FILE, JSON.stringify({}, null, 2));
-    }
-  } catch (err) {
-    console.error("Error initializing agent storage:", err.response?.data || err.message || err);
-    throw err;
-  }
+let cache = null; // Map<waId, agent> once loaded; null means "not loaded yet"
+let loadingPromise = null;
+
+async function loadCache() {
+  if (cache) return cache;
+  if (loadingPromise) return loadingPromise;
+  loadingPromise = sheets.readAllAgents().then((agents) => {
+    cache = new Map(agents.map((a) => [a.waId, a]));
+    loadingPromise = null;
+    return cache;
+  });
+  return loadingPromise;
 }
 
-function load() {
-  try {
-    ensureStorageReady();
-    return JSON.parse(fs.readFileSync(FILE, "utf8"));
-  } catch (err) {
-    console.error("Error loading agents from file:", err.response?.data || err.message || err);
-    return {};
-  }
+async function getAgent(waId) {
+  const map = await loadCache();
+  return map.get(waId) || null;
 }
 
-function saveAll(agents) {
-  try {
-    ensureStorageReady();
-    fs.writeFileSync(FILE, JSON.stringify(agents, null, 2));
-  } catch (err) {
-    console.error("Error saving agents to file:", err.response?.data || err.message || err);
-    throw err;
-  }
-}
-
-function getAgent(waId) {
-  const agents = load();
-  return agents[waId] || null;
-}
-
-function registerAgent(waId, profile) {
-  const agents = load();
-  agents[waId] = { ...profile, waId, registeredAt: new Date().toISOString() };
-  saveAll(agents);
-  return agents[waId];
+async function registerAgent(waId, profile) {
+  const agent = { ...profile, waId, registeredAt: new Date().toISOString() };
+  await sheets.appendAgent(agent);
+  const map = await loadCache();
+  map.set(waId, agent);
+  return agent;
 }
 
 function isAuthorizedAdmin(waId) {
@@ -58,4 +38,4 @@ function isAuthorizedAdmin(waId) {
   return admins.includes(waId);
 }
 
-module.exports = { getAgent, registerAgent, isAuthorizedAdmin, ensureStorageReady };
+module.exports = { getAgent, registerAgent, isAuthorizedAdmin };

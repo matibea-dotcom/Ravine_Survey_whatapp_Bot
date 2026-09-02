@@ -1,11 +1,14 @@
 const { google } = require("googleapis");
 const path = require("path");
+const { RAVINE_UHT_SKUS } = require("./survey");
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID;
-const SHEET_TAB = process.env.GOOGLE_SHEET_TAB || "Submissions";
+const SUBMISSIONS_TAB = process.env.GOOGLE_SHEET_TAB || "Submissions";
+const AGENTS_TAB = process.env.GOOGLE_SHEET_AGENTS_TAB || "Agents";
 const KEY_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "./service-account.json";
 
 let sheetsClient = null;
+const ensuredTabs = new Set();
 
 async function getClient() {
   if (sheetsClient) return sheetsClient;
@@ -18,8 +21,67 @@ async function getClient() {
   return sheetsClient;
 }
 
-// Column order — keep this in sync with the header row you create in the sheet.
-const COLUMNS = [
+/** Creates the named tab if it doesn't already exist in the spreadsheet. */
+async function ensureTabExists(tabName) {
+  if (ensuredTabs.has(tabName)) return;
+  const sheets = await getClient();
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const exists = (meta.data.sheets || []).some((s) => s.properties.title === tabName);
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
+    });
+  }
+  ensuredTabs.add(tabName);
+}
+
+async function ensureHeader(tabName, columns) {
+  await ensureTabExists(tabName);
+  const sheets = await getClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${tabName}!A1:1`,
+  });
+  if (!res.data.values || res.data.values.length === 0) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${tabName}!A1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [columns] },
+    });
+  }
+}
+
+async function appendRow(tabName, columns, row) {
+  await ensureHeader(tabName, columns);
+  const sheets = await getClient();
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID,
+    range: `${tabName}!A1`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+}
+
+/** Reads all data rows (excluding header) from a tab as arrays of cell values. */
+async function readAllRows(tabName, columns) {
+  await ensureHeader(tabName, columns);
+  const sheets = await getClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${tabName}!A2:ZZ`,
+  });
+  return res.data.values || [];
+}
+
+// ---- Submissions ----
+// Ravine UHT SKUs get their own wholesale/RRP column pair each, since pricing
+// is captured per-SKU (see engine.js SKU pricing loop).
+const SKU_PRICE_COLUMNS = RAVINE_UHT_SKUS.flatMap((sku) => [`${sku} WS`, `${sku} RRP`]);
+
+const SUBMISSION_COLUMNS = [
   "referenceNumber",
   "submittedAt",
   "sessionId",
@@ -35,9 +97,12 @@ const COLUMNS = [
   "gpsLng",
   "gpsAddress",
   "gpsSource",
-  "productXAvailable",
-  "productXWsPrice",
-  "productXRrp",
+  "soldInStatus",
+  "notStockedReason",
+  "willingToStock",
+  "productXSkusAvailable",
+  ...SKU_PRICE_COLUMNS,
+  "stockOutFrequency",
   "competitorCategory",
   "competitorProducts",
   "competitorWsPrice",
@@ -46,32 +111,23 @@ const COLUMNS = [
   "merchandisingCompetitor",
   "distributorName",
   "distributorAgentName",
-  "soldInStatus",
   "deliveryDays",
   "comments",
   "flags",
 ];
 
-async function ensureHeader() {
-  const sheets = await getClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_TAB}!A1:1`,
-  });
-  if (!res.data.values || res.data.values.length === 0) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${SHEET_TAB}!A1`,
-      valueInputOption: "RAW",
-      requestBody: { values: [COLUMNS] },
-    });
-  }
-}
-
 function flattenSubmission(submission) {
   const a = submission.answers;
   const gps = a.gpsLocation || {};
-  return COLUMNS.map((col) => {
+  const skuPricing = a.productXSkuPricing || {};
+  return SUBMISSION_COLUMNS.map((col) => {
+    if (col.endsWith(" WS") || col.endsWith(" RRP")) {
+      const isWs = col.endsWith(" WS");
+      const sku = col.slice(0, col.length - (isWs ? 3 : 4));
+      const entry = skuPricing[sku];
+      if (!entry) return "";
+      return isWs ? entry.ws ?? "" : entry.rrp ?? "";
+    }
     switch (col) {
       case "referenceNumber": return submission.referenceNumber;
       case "submittedAt": return submission.submittedAt;
@@ -85,8 +141,10 @@ function flattenSubmission(submission) {
       case "gpsLng": return gps.lng ?? "";
       case "gpsAddress": return gps.address ?? "";
       case "gpsSource": return gps.source ?? "";
+      case "productXSkusAvailable": return (a.productXSkusAvailable || []).join(", ");
       case "competitorCategory": return (a.competitorCategory || []).join(", ");
       case "competitorProducts": return (a.competitorProducts || []).join(", ");
+      case "merchandisingOwn": return (a.merchandisingOwn || []).join(", ");
       case "merchandisingCompetitor": return (a.merchandisingCompetitor || []).join(", ");
       case "deliveryDays": return (a.deliveryDays || []).join(", ");
       case "flags": return (submission.flags || []).join("; ");
@@ -96,22 +154,35 @@ function flattenSubmission(submission) {
 }
 
 async function appendSubmission(submission) {
-  try {
-    const sheets = await getClient();
-    await ensureHeader();
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: `${SHEET_TAB}!A1`,
-      valueInputOption: "USER_ENTERED",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: { values: [flattenSubmission(submission)] },
-    });
-  } catch (err) {
-    console.error(
-      "Sheets append failed:",
-      err.response?.data || err.stack || err
-    );
-  }
+  await appendRow(SUBMISSIONS_TAB, SUBMISSION_COLUMNS, flattenSubmission(submission));
 }
 
-module.exports = { appendSubmission, COLUMNS };
+// ---- Agents (registration registry — durable across redeploys) ----
+const AGENT_COLUMNS = ["waId", "fullName", "agentId", "region", "companyName", "registeredAt"];
+
+async function appendAgent(agent) {
+  await appendRow(
+    AGENTS_TAB,
+    AGENT_COLUMNS,
+    AGENT_COLUMNS.map((c) => agent[c] ?? "")
+  );
+}
+
+async function readAllAgents() {
+  const rows = await readAllRows(AGENTS_TAB, AGENT_COLUMNS);
+  return rows
+    .filter((row) => row[0]) // skip blank rows
+    .map((row) => {
+      const agent = {};
+      AGENT_COLUMNS.forEach((col, i) => (agent[col] = row[i] ?? ""));
+      return agent;
+    });
+}
+
+module.exports = {
+  appendSubmission,
+  appendAgent,
+  readAllAgents,
+  SUBMISSION_COLUMNS,
+  AGENT_COLUMNS,
+};

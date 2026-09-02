@@ -89,6 +89,14 @@ function summaryText(session) {
         : String(v);
       return `• ${s.label}: ${display}`;
     });
+
+  const skuPricing = session.answers.productXSkuPricing;
+  if (skuPricing && Object.keys(skuPricing).length > 0) {
+    lines.push(
+      ...Object.entries(skuPricing).map(([sku, p]) => `• ${sku}: WS ${p.ws ?? "-"} / RRP ${p.rrp ?? "-"}`)
+    );
+  }
+
   return lines.length ? lines.join("\n") : "No answers captured yet.";
 }
 
@@ -120,7 +128,7 @@ async function handleInboundMessage(waId, message) {
     return replies;
   }
 
-  const agent = agentStore.getAgent(waId);
+  const agent = await agentStore.getAgent(waId);
 
   // --- Registration flow for first-time users (SOW 1.4) ---
   if (!agent) {
@@ -180,6 +188,12 @@ async function handleInboundMessage(waId, message) {
   }
 
   sessionStore.touch(session);
+
+  // --- SKU pricing loop takes priority over normal step processing — see
+  // handleSkuLoop() for why this can't just be another static SURVEY_STEPS entry. ---
+  if (session.skuLoop) {
+    return handleSkuLoop(session, message, upper, replies);
+  }
 
   // --- SUBMIT flow ---
   if (upper === "SUBMIT") {
@@ -318,6 +332,15 @@ async function handleInboundMessage(waId, message) {
     replies.push(`Noted. (${flagNote})`);
   }
 
+  // Selecting Ravine UHT SKUs kicks off a per-SKU wholesale/RRP pricing loop
+  // instead of advancing straight to the next static step — the number of
+  // price questions depends on how many SKUs were just selected.
+  if (step.key === "productXSkusAvailable" && Array.isArray(result.value) && result.value.length > 0) {
+    session.skuLoop = { skus: result.value, index: 0, field: "ws" };
+    replies.push(...promptForSkuLoopOrContinue(session));
+    return replies;
+  }
+
   advance(session);
   replies.push(...promptForCurrentOrSummary(session));
   return replies;
@@ -325,6 +348,77 @@ async function handleInboundMessage(waId, message) {
 
 function advance(session) {
   session.stepIndex += 1;
+}
+
+// --- Per-SKU pricing loop (Ravine UHT) ---
+// Runs right after `productXSkusAvailable` is answered with 1+ SKUs. Asks
+// wholesale price then RRP for each selected SKU in turn, storing results in
+// session.answers.productXSkuPricing = { [sku]: { ws, rrp } }. Editing SKU
+// pricing after the fact isn't supported via EDIT — RESTART if a correction
+// is needed before SUBMIT.
+function handleSkuLoop(session, message, upper, replies) {
+  const loop = session.skuLoop;
+  const sku = loop.skus[loop.index];
+
+  if (["SUBMIT", "EDIT", "BACK"].includes(upper)) {
+    replies.push(
+      `Please finish entering SKU pricing first (type SKIP to skip this one), then ${upper} again.`
+    );
+    return replies;
+  }
+
+  if (upper === "SKIP") {
+    advanceSkuLoop(loop);
+    replies.push(...promptForSkuLoopOrContinue(session));
+    return replies;
+  }
+
+  const raw = message.type === "text" ? message.text.body : "";
+  const result = validators.validateNumeric(raw, { allowZero: false });
+  if (!result.ok) {
+    replies.push(`${result.error} Or type SKIP to skip this price.`);
+    return replies;
+  }
+
+  session.answers.productXSkuPricing = session.answers.productXSkuPricing || {};
+  session.answers.productXSkuPricing[sku] = session.answers.productXSkuPricing[sku] || {};
+
+  if (loop.field === "ws") {
+    session.answers.productXSkuPricing[sku].ws = result.value;
+  } else {
+    const ws = session.answers.productXSkuPricing[sku].ws;
+    if (ws != null && result.value < ws) {
+      session.flags = session.flags || [];
+      session.flags.push(`${sku}: RRP is lower than wholesale price — flagged for review.`);
+      replies.push("Noted (RRP lower than wholesale — flagged for review).");
+    }
+    session.answers.productXSkuPricing[sku].rrp = result.value;
+  }
+
+  advanceSkuLoop(loop);
+  replies.push(...promptForSkuLoopOrContinue(session));
+  return replies;
+}
+
+function advanceSkuLoop(loop) {
+  if (loop.field === "ws") {
+    loop.field = "rrp";
+  } else {
+    loop.field = "ws";
+    loop.index += 1;
+  }
+}
+
+function promptForSkuLoopOrContinue(session) {
+  const loop = session.skuLoop;
+  if (loop.index >= loop.skus.length) {
+    session.skuLoop = null;
+    advance(session); // move past the productXSkusAvailable step in the main flow
+    return promptForCurrentOrSummary(session);
+  }
+  const sku = loop.skus[loop.index];
+  const label = loop.field === "ws" ? "wholesale price" : "RRP (recommended retail price)";
+  return [`What is the *${label}* for *${sku}*? (numbers only, or SKIP)`];
 }
 
 function promptForCurrentOrSummary(session) {
@@ -526,7 +620,7 @@ async function finalizeSubmit(waId, agent, session, replies) {
   return replies;
 }
 
-function handleRegistration(waId, message, replies) {
+async function handleRegistration(waId, message, replies) {
   let regState = registrationState(waId);
   const raw = message.type === "text" ? message.text.body : "";
 
@@ -549,7 +643,7 @@ function handleRegistration(waId, message, replies) {
   saveRegistrationState(waId, regState);
 
   if (regState.index >= REGISTRATION_STEPS.length) {
-    agentStore.registerAgent(waId, regState.answers);
+    await agentStore.registerAgent(waId, regState.answers);
     clearRegistrationState(waId);
     replies.push(
       `Thanks, ${regState.answers.fullName}! You're registered. Type START to begin your first store visit survey, or HELP for commands.`

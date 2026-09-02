@@ -1,24 +1,79 @@
-// Configurable lists — update these as the business requires (SOW 1.11, 1.16).
-const PRODUCT_X_NAME = process.env.PRODUCT_X_NAME || "Product X";
+// ---- Ravine Dairies configuration ----
+// Edit these lists directly as SKUs, competitors, or campaigns change.
+// (Sourced against current Kenyan dairy market structure — Brookside/Tuzo/Ilara/
+// Molo Milk, New KCC, Githunguri's Fresha, Daima, Bio Foods, plus Nakuru-local
+// Alpha Dairy — update as your own market intelligence updates.)
 
-const COMPETITOR_CATEGORIES = ["Category A", "Category B", "Category C", "Other"];
+const RAVINE_BRAND_NAME = process.env.RAVINE_BRAND_NAME || "Ravine Dairies";
+
+// The UHT SKUs Ravine Dairies sells — this is the core of the survey.
+const RAVINE_UHT_SKUS = [
+  "250ml Full Cream UHT",
+  "500ml Full Cream UHT",
+  "1L Full Cream UHT",
+  "500ml Low Fat UHT",
+];
+
+const COMPETITOR_CATEGORIES = [
+  "Fresh Pasteurized Milk",
+  "UHT/Long-Life Milk",
+  "Fermented Milk (Mala/Lala)",
+  "Yoghurt",
+  "Powdered Milk",
+  "Butter & Ghee",
+  "Cheese",
+];
 
 const COMPETITOR_PRODUCTS_BY_CATEGORY = {
-  "Category A": ["Brand A1", "Brand A2", "Brand A3", "Brand A4", "Brand A5", "Other"],
-  "Category B": ["Brand B1", "Brand B2", "Brand B3", "Brand B4", "Brand B5", "Other"],
-  "Category C": ["Brand C1", "Brand C2", "Brand C3", "Brand C4", "Brand C5", "Other"],
-  Other: ["Other"],
+  "Fresh Pasteurized Milk": ["Brookside", "Tuzo", "Ilara", "New KCC (Gold Crown/Farm Fresh)", "Fresha (Githunguri)", "Daima", "Alpha Dairy (Nakuru)", "Other"],
+  "UHT/Long-Life Milk": ["Brookside UHT", "New KCC UHT", "Daima UHT", "Fresha UHT", "Other"],
+  "Fermented Milk (Mala/Lala)": ["Brookside Lala", "New KCC Mala", "Fresha Mala", "Daima Mala", "Other"],
+  "Yoghurt": ["Brookside Yoghurt", "Bio Foods Yoghurt", "New KCC Delite", "Daima Yoghurt", "Fresha Yoghurt", "Other"],
+  "Powdered Milk": ["New KCC Powdered Milk", "Nido (Nestle)", "Other"],
+  "Butter & Ghee": ["Brookside Butter/Ghee", "New KCC Butter/Ghee", "Zesta Ghee", "Other"],
+  "Cheese": ["Brookside Cheese", "New KCC Cheese", "Other"],
 };
 
+// Trade marketing materials relevant to dairy retail — fridge branding matters
+// a lot for milk specifically, alongside standard POS materials.
 const MERCHANDISING_DISPLAY_TYPES = [
-  "Shelf Display",
-  "Floor Stand",
   "Fridge/Cooler Branding",
-  "Wall Poster",
+  "Posters",
+  "Danglers",
+  "Shelf Strip",
+  "Branded Umbrella/Signage",
   "None",
 ];
 
-const SOLD_IN_STATUS_OPTIONS = ["Sold In", "Seeding", "Not Stocked", "Discontinued"];
+const SOLD_IN_STATUS_OPTIONS = ["Sold In - Actively Stocked", "Seeding - Recently Introduced", "Not Stocked", "Discontinued"];
+
+// Distribution-growth fields: for stores NOT stocking Ravine UHT, capture why —
+// this is the actionable data for converting new outlets.
+const NOT_STOCKED_REASONS = [
+  "No demand from customers",
+  "Distributor doesn't deliver here",
+  "Price too high vs competitors",
+  "Prefers competitor brand",
+  "Never approached by a rep",
+  "Limited shelf/fridge space",
+  "Other",
+];
+
+const WILLINGNESS_TO_STOCK_OPTIONS = [
+  "Yes - Interested, ready to order",
+  "Maybe - Needs follow-up",
+  "No - Not interested",
+];
+
+// For stores that DO stock Ravine UHT — supply reliability is a direct
+// distribution-growth signal (a store that stocks out often is losing sales
+// you could be capturing with better delivery frequency).
+const STOCK_OUT_FREQUENCY_OPTIONS = [
+  "Never runs out",
+  "Occasionally (1-2x/month)",
+  "Frequently (weekly)",
+  "Almost always understocked",
+];
 
 const DELIVERY_DAYS = [
   "Monday",
@@ -38,7 +93,7 @@ const REGISTRATION_STEPS = [
   { key: "companyName", label: "Company Name", type: "text", prompt: "Which *company* are you registering with?" },
 ];
 
-// ---- Main survey (SOW 1.8 validation table, 1.11-1.14) ----
+// ---- Main survey ----
 const SURVEY_STEPS = [
   {
     key: "retailerName",
@@ -71,44 +126,64 @@ const SURVEY_STEPS = [
     prompt: "📍 Please share the store's *location pin*, or type the address if you can't share a pin.",
   },
   {
-    key: "productXAvailable",
-    label: `${PRODUCT_X_NAME} Available`,
+    key: "soldInStatus",
+    label: "Sold In Status",
+    type: "select",
+    required: true,
+    prompt: `What is *${RAVINE_BRAND_NAME} UHT's* status in this store?\n` + SOLD_IN_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    options: SOLD_IN_STATUS_OPTIONS,
+  },
+  // --- Branch: store DOES NOT currently stock Ravine UHT (distribution growth opportunity) ---
+  {
+    key: "notStockedReason",
+    label: "Reason Not Stocked",
     type: "select",
     required: false,
-    prompt: `Is *${PRODUCT_X_NAME}* available in this store?\n1. Yes\n2. No`,
-    options: ["Yes", "No"],
+    prompt: "Why isn't it currently stocked here?\n" + NOT_STOCKED_REASONS.map((r, i) => `${i + 1}. ${r}`).join("\n"),
+    options: NOT_STOCKED_REASONS,
+    skipIf: (a) => a.soldInStatus !== "Not Stocked" && a.soldInStatus !== "Discontinued",
   },
   {
-    key: "productXWsPrice",
-    label: `${PRODUCT_X_NAME} W/S Price`,
-    type: "numeric",
+    key: "willingToStock",
+    label: "Willing to Stock",
+    type: "select",
     required: false,
-    prompt: `What is the *wholesale price* of ${PRODUCT_X_NAME}? (numbers only, or SKIP)`,
-    opts: { allowZero: false },
-    skipIf: (a) => a.productXAvailable !== "Yes",
+    prompt: "Would this store be willing to stock Ravine UHT if approached?\n" + WILLINGNESS_TO_STOCK_OPTIONS.map((w, i) => `${i + 1}. ${w}`).join("\n"),
+    options: WILLINGNESS_TO_STOCK_OPTIONS,
+    skipIf: (a) => a.soldInStatus !== "Not Stocked" && a.soldInStatus !== "Discontinued",
+  },
+  // --- Branch: store DOES stock Ravine UHT — capture which SKUs (per-SKU pricing
+  // is captured via a dynamic loop in engine.js right after this step; see
+  // engine.js `handleSkuPricingLoop`, since the number of price questions
+  // depends on how many SKUs are selected here) ---
+  {
+    key: "productXSkusAvailable",
+    label: "Ravine UHT SKUs Stocked",
+    type: "multiselect",
+    required: false,
+    prompt:
+      `Which *${RAVINE_BRAND_NAME} UHT SKUs* are stocked here? Reply with numbers, comma/space separated, or SKIP:\n` +
+      RAVINE_UHT_SKUS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    options: RAVINE_UHT_SKUS,
+    skipIf: (a) => a.soldInStatus === "Not Stocked" || a.soldInStatus === "Discontinued",
   },
   {
-    key: "productXRrp",
-    label: `${PRODUCT_X_NAME} RRP`,
-    type: "numeric",
+    key: "stockOutFrequency",
+    label: "Stock-Out Frequency",
+    type: "select",
     required: false,
-    prompt: `What is the *recommended retail price (RRP)* of ${PRODUCT_X_NAME}? (numbers only, or SKIP)`,
-    opts: { allowZero: false },
-    skipIf: (a) => a.productXAvailable !== "Yes",
-    crossValidate: (value, a) => {
-      if (a.productXWsPrice != null && value < a.productXWsPrice) {
-        return { flagged: true, note: "RRP is lower than wholesale price — flagged for review." };
-      }
-      return { flagged: false };
-    },
+    prompt: "How often does this store run out of Ravine UHT between deliveries?\n" + STOCK_OUT_FREQUENCY_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    options: STOCK_OUT_FREQUENCY_OPTIONS,
+    skipIf: (a) => !a.productXSkusAvailable || a.productXSkusAvailable.length === 0,
   },
+  // --- Competitive landscape ---
   {
     key: "competitorCategory",
     label: "Competitor Category",
     type: "multiselect",
     required: false,
     prompt:
-      "Which *competitor categories* are stocked here? Reply with numbers (e.g. 1,3) or SKIP:\n" +
+      "Which *competitor dairy categories* are stocked here? Reply with numbers (e.g. 1,3) or SKIP:\n" +
       COMPETITOR_CATEGORIES.map((c, i) => `${i + 1}. ${c}`).join("\n"),
     options: COMPETITOR_CATEGORIES,
   },
@@ -117,7 +192,6 @@ const SURVEY_STEPS = [
     label: "Competitor Products",
     type: "multiselect_dynamic",
     required: false,
-    // options resolved at runtime from selected categories
     promptBuilder: (a) => {
       const cats = a.competitorCategory || [];
       const productSet = new Set();
@@ -126,7 +200,7 @@ const SURVEY_STEPS = [
       return {
         options,
         prompt:
-          "Which *competitor products* are stocked? Reply with numbers, comma or space separated:\n" +
+          "Which *competitor brands* are stocked? Reply with numbers, comma or space separated:\n" +
           options.map((p, i) => `${i + 1}. ${p}`).join("\n"),
       };
     },
@@ -137,7 +211,7 @@ const SURVEY_STEPS = [
     label: "Competitor W/S Price",
     type: "numeric",
     required: false,
-    prompt: "What is the *competitor wholesale price*? (numbers only, or SKIP)",
+    prompt: "What is the *competitor wholesale price* (representative SKU)? (numbers only, or SKIP)",
     opts: { allowZero: false },
     skipIf: (a) => !a.competitorProducts || a.competitorProducts.length === 0,
   },
@@ -146,7 +220,7 @@ const SURVEY_STEPS = [
     label: "Competitor RRP",
     type: "numeric",
     required: false,
-    prompt: "What is the *competitor RRP*? (numbers only, or SKIP)",
+    prompt: "What is the *competitor RRP* (representative SKU)? (numbers only, or SKIP)",
     opts: { allowZero: false },
     skipIf: (a) => !a.competitorProducts || a.competitorProducts.length === 0,
     crossValidate: (value, a) => {
@@ -156,13 +230,14 @@ const SURVEY_STEPS = [
       return { flagged: false };
     },
   },
+  // --- Merchandising ---
   {
     key: "merchandisingOwn",
-    label: "Merchandising (Own)",
-    type: "select",
+    label: "Merchandising (Ravine)",
+    type: "multiselect",
     required: true,
     prompt:
-      "What *own-brand merchandising* is present?\n" +
+      `What *${RAVINE_BRAND_NAME} branding/merchandising* is present? Reply with numbers, comma/space separated:\n` +
       MERCHANDISING_DISPLAY_TYPES.map((d, i) => `${i + 1}. ${d}`).join("\n"),
     options: MERCHANDISING_DISPLAY_TYPES,
   },
@@ -176,12 +251,13 @@ const SURVEY_STEPS = [
       MERCHANDISING_DISPLAY_TYPES.map((d, i) => `${i + 1}. ${d}`).join("\n"),
     options: MERCHANDISING_DISPLAY_TYPES,
   },
+  // --- Distribution / trade info ---
   {
     key: "distributorName",
     label: "Distributor Name",
     type: "text",
     required: true,
-    prompt: "Who is the *distributor* supplying this store?",
+    prompt: "Who is the *distributor* supplying this store (or who currently could)?",
     opts: { min: 2, max: 50 },
   },
   {
@@ -191,14 +267,6 @@ const SURVEY_STEPS = [
     required: true,
     prompt: "What is the *distributor's sales agent/salesman* name for this store?",
     opts: { min: 2, max: 50 },
-  },
-  {
-    key: "soldInStatus",
-    label: "Sold In Status",
-    type: "select",
-    required: true,
-    prompt: "What is the *sold-in status*?\n" + SOLD_IN_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
-    options: SOLD_IN_STATUS_OPTIONS,
   },
   {
     key: "deliveryDays",
@@ -224,10 +292,14 @@ const SURVEY_STEPS = [
 module.exports = {
   REGISTRATION_STEPS,
   SURVEY_STEPS,
-  PRODUCT_X_NAME,
+  RAVINE_BRAND_NAME,
+  RAVINE_UHT_SKUS,
   COMPETITOR_CATEGORIES,
   COMPETITOR_PRODUCTS_BY_CATEGORY,
   MERCHANDISING_DISPLAY_TYPES,
   SOLD_IN_STATUS_OPTIONS,
+  NOT_STOCKED_REASONS,
+  WILLINGNESS_TO_STOCK_OPTIONS,
+  STOCK_OUT_FREQUENCY_OPTIONS,
   DELIVERY_DAYS,
 };
