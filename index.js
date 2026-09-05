@@ -55,11 +55,21 @@ const REGISTRATION_STEPS = [
   },
 ];
 
+function trackKeyFromArg(arg) {
+  const trimmed = String(arg).trim();
+  const numeric = Number(trimmed);
+  if (Number.isInteger(numeric)) return trackKeyFromIndex(numeric);
+  const upperArg = trimmed.toUpperCase();
+  return TRACK_ORDER.includes(upperArg) ? upperArg : null;
+}
+
 module.exports = {
   TRACKS,
   TRACK_ORDER,
   trackLabel,
+  trackOptionsPrompt,
   trackKeyFromIndex,
+  trackKeyFromArg,
   getSurveyStepsForTrack,
   getColumnsForTrack,
   getSheetTabForTrack,

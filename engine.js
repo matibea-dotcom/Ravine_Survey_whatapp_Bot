@@ -6,7 +6,9 @@ const {
   REGISTRATION_STEPS,
   TRACK_ORDER,
   trackLabel,
+  trackOptionsPrompt,
   trackKeyFromIndex,
+  trackKeyFromArg,
   getSurveyStepsForTrack,
   getColumnsForTrack,
 } = require("./surveys");
@@ -90,7 +92,9 @@ function helpText(registered) {
     "RESTART - start this survey over\n" +
     "SUBMIT - submit completed survey\n" +
     "MENU - show this menu\n" +
-    "EXIT - end session"
+    "EXIT - end session\n" +
+    "MYTRACK - show your current survey track\n" +
+    "SWITCHTRACK <track> - change your survey track (e.g. SWITCHTRACK MT)"
   );
 }
 
@@ -130,9 +134,91 @@ async function handleInboundMessage(waId, message) {
 
   const agent = agentStore.getAgent(waId);
 
+  // --- Admin: wipe ALL registered agents + sessions, start fresh ---
+  // Two-step so it can't be triggered by accident. Does not touch Sheets data.
+  if (upper === "RESETAGENTS") {
+    if (!agentStore.isAuthorizedAdmin(waId)) {
+      replies.push("That command is only available to authorized users.");
+      return replies;
+    }
+    replies.push(
+      "⚠️ This will permanently remove ALL registered agents and clear all active sessions. " +
+        "Everyone will need to register again (and re-pick their track) the next time they message. " +
+        "This does NOT delete anything already saved to Google Sheets.\n\n" +
+        "To proceed, reply exactly: RESETAGENTS CONFIRM"
+    );
+    return replies;
+  }
+  if (upper === "RESETAGENTS CONFIRM") {
+    if (!agentStore.isAuthorizedAdmin(waId)) {
+      replies.push("That command is only available to authorized users.");
+      return replies;
+    }
+    agentStore.clearAllAgents();
+    sessionStore.clearAll();
+    registrationStates.clear();
+    offTopicStreaks.clear();
+    recentSubmissions.clear();
+    replies.push(
+      "✅ All registered agents and active sessions have been cleared. The bot is starting fresh — " +
+        "anyone who messages now (including you) will go through registration again."
+    );
+    return replies;
+  }
+
+  // --- Admin: fix any agent's track remotely (no shell/file access needed) ---
+  // Usage: SETTRACK <phone_number> <GT|MT|INSURANCE|1|2|3>
+  if (upper.startsWith("SETTRACK ")) {
+    if (!agentStore.isAuthorizedAdmin(waId)) {
+      replies.push("That command is only available to authorized users.");
+      return replies;
+    }
+    const parts = rawText.trim().split(/\s+/);
+    if (parts.length < 3) {
+      replies.push(`Usage: SETTRACK <phone_number> <track>\n${trackOptionsPrompt()}`);
+      return replies;
+    }
+    const [, phoneArg, trackArg] = parts;
+    const target = agentStore.findAgentByPhone(phoneArg);
+    if (!target) {
+      replies.push(`No registered agent found for ${phoneArg}.`);
+      return replies;
+    }
+    const trackKey = trackKeyFromArg(trackArg);
+    if (!trackKey) {
+      replies.push(`Unrecognized track "${trackArg}". Reply with a number or key:\n${trackOptionsPrompt()}`);
+      return replies;
+    }
+    agentStore.updateAgent(target.waId, { surveyTrack: trackKey });
+    sessionStore.clear(target.waId); // avoid a stale in-progress survey built from the old track's questions
+    replies.push(`✅ ${target.fullName} (${target.waId}) has been switched to *${trackLabel(trackKey)}*.`);
+    return replies;
+  }
+
   // --- Registration flow for first-time users (SOW 1.4) ---
   if (!agent) {
     return handleRegistration(waId, message, replies);
+  }
+
+  // --- Self-service: check or change your own track ---
+  if (upper === "MYTRACK" || upper === "WHOAMI") {
+    replies.push(`You're registered as *${agent.fullName}* on the *${trackLabel(agent.surveyTrack || "GT")}* survey.`);
+    return replies;
+  }
+  if (upper.startsWith("SWITCHTRACK ")) {
+    const arg = rawText.trim().slice("SWITCHTRACK ".length).trim();
+    const trackKey = trackKeyFromArg(arg);
+    if (!trackKey) {
+      replies.push(`Unrecognized track. Reply SWITCHTRACK followed by a number or key:\n${trackOptionsPrompt()}`);
+      return replies;
+    }
+    agentStore.updateAgent(waId, { surveyTrack: trackKey });
+    agent.surveyTrack = trackKey;
+    sessionStore.clear(waId); // avoid a stale in-progress survey built from the old track's questions
+    replies.push(
+      `✅ Your survey track is now *${trackLabel(trackKey)}*. Any in-progress survey was cleared — type START to begin a ${trackLabel(trackKey)} submission.`
+    );
+    return replies;
   }
 
   let session = sessionStore.get(waId);
