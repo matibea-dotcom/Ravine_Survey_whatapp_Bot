@@ -44,9 +44,26 @@ async function registerAgent(waId, profile) {
   return agent;
 }
 
+/**
+ * Clear an agent from the system to allow re-registration.
+ * Removes from both the Sheets backend and in-memory cache.
+ * (SOW 2.7 extension — allows agents to change survey tracks)
+ */
+async function clearAgent(waId) {
+  try {
+    await sheets.deleteAgent(waId);
+    const map = await loadCache();
+    map.delete(waId);
+    return true;
+  } catch (err) {
+    console.error("Failed to clear agent:", err.message);
+    return false;
+  }
+}
+
 function isAuthorizedAdmin(waId) {
   const admins = (process.env.ADMIN_WA_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
   return admins.includes(waId);
 }
 
-module.exports = { getAgent, registerAgent, isAuthorizedAdmin, ensureStorageReady };
+module.exports = { getAgent, registerAgent, clearAgent, isAuthorizedAdmin, ensureStorageReady };
