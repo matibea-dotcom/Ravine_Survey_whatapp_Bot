@@ -72,6 +72,19 @@ function findAgentByPhone(rawNumber) {
   return agents[digits] ? { waId: digits, ...agents[digits] } : null;
 }
 
+// Clears a specific agent by WhatsApp ID so they can re-register afresh.
+// Does not touch Google Sheets submissions — only local registration state.
+// Returns true if agent was found and removed, false if not found.
+function clearAgent(waId) {
+  const agents = load();
+  if (!agents[waId]) {
+    return false;
+  }
+  delete agents[waId];
+  saveAll(agents);
+  return true;
+}
+
 // Wipes every registered agent so the bot starts fresh. Does not touch
 // Google Sheets submissions — only local registration state.
 function clearAllAgents() {
@@ -88,6 +101,7 @@ module.exports = {
   registerAgent,
   updateAgent,
   findAgentByPhone,
+  clearAgent,
   clearAllAgents,
   isAuthorizedAdmin,
   ensureStorageReady,
