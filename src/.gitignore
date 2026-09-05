@@ -1,0 +1,7 @@
+node_modules/
+.env
+service-account.json
+data/agents.json
+*.log
+.vscode/
+.idea/

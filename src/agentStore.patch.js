@@ -1,0 +1,1 @@
+function deleteAgent(waId){ /* add this function and export it */ }
