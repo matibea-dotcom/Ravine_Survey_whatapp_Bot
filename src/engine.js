@@ -11,7 +11,7 @@ const GLOBAL_COMMANDS = [
   "RESTART", "EXIT", "SUMMARY", "STOP",
 ];
 const SURVEY_COMMANDS = ["START", "SKIP", "EDIT", "SUBMIT", "CONFIRM"];
-const ADMIN_COMMANDS = ["REPORT", "MYDATA", "STATS"];
+const ADMIN_COMMANDS = ["REPORT", "MYDATA", "STATS", "RESETAGENT"];
 
 // Recent submissions kept in memory for duplicate detection (SOW 2.4).
 // { waId -> [{ retailerName, at }] }
@@ -161,7 +161,7 @@ async function handleInboundMessage(waId, message) {
     if (!agentStore.isAuthorizedAdmin(waId)) {
       replies.push("That command is only available to authorized users.");
     } else {
-      replies.push(handleAdminCommand(upper));
+      return handleAdminCommand(waId, agent, session, upper, replies);
     }
     return replies;
   }
@@ -529,16 +529,35 @@ function handleGlobalCommand(waId, agent, session, cmd, replies) {
   }
 }
 
-function handleAdminCommand(cmd) {
+async function handleAdminCommand(waId, agent, session, cmd, replies) {
   switch (cmd) {
     case "REPORT":
-      return "A summary report request has been logged. Your supervisor will receive it shortly. (Wire this up to your reporting job / Sheet query.)";
+      replies.push("A summary report request has been logged. Your supervisor will receive it shortly. (Wire this up to your reporting job / Sheet query.)");
+      return replies;
     case "MYDATA":
-      return "Your submission history will be sent shortly. (Wire this up to a Sheets lookup filtered by your agent ID.)";
+      replies.push("Your submission history will be sent shortly. (Wire this up to a Sheets lookup filtered by your agent ID.)");
+      return replies;
     case "STATS":
-      return "Your personal stats will be sent shortly. (Wire this up to a Sheets lookup filtered by your agent ID.)";
+      replies.push("Your personal stats will be sent shortly. (Wire this up to a Sheets lookup filtered by your agent ID.)");
+      return replies;
+    case "RESETAGENT": {
+      // Clear agent registration to allow re-registration with new survey track
+      const success = await agentStore.clearAgent(waId);
+      if (success) {
+        sessionStore.clear(waId); // Also clear any active sessions
+        replies.push(
+          `✅ Your agent registration has been reset. Type START or reply to register again with a new survey track.`
+        );
+      } else {
+        replies.push(
+          `⚠️ Failed to reset agent registration. Please contact your supervisor for assistance.`
+        );
+      }
+      return replies;
+    }
     default:
-      return "Unknown admin command.";
+      replies.push("Unknown admin command.");
+      return replies;
   }
 }
 
