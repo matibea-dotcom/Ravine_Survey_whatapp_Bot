@@ -8,10 +8,10 @@ const MAX_RETRIES = 3;
 const MAX_BACK = 5;
 const GLOBAL_COMMANDS = [
   "HELP", "BACK", "MENU", "SAVE", "RESUME", "CANCEL", "STATUS",
-  "RESTART", "EXIT", "SUMMARY", "STOP",
+  "RESTART", "EXIT", "SUMMARY", "STOP", "RESETAGENT",
 ];
 const SURVEY_COMMANDS = ["START", "SKIP", "EDIT", "SUBMIT", "CONFIRM"];
-const ADMIN_COMMANDS = ["REPORT", "MYDATA", "STATS", "RESETAGENT"];
+const ADMIN_COMMANDS = ["REPORT", "MYDATA", "STATS"];
 
 // Recent submissions kept in memory for duplicate detection (SOW 2.4).
 // { waId -> [{ retailerName, at }] }
@@ -71,6 +71,7 @@ function helpText(registered) {
     "CANCEL - cancel this survey\n" +
     "RESTART - start this survey over\n" +
     "SUBMIT - submit completed survey\n" +
+    "RESETAGENT - reset your registration to choose a new survey track\n" +
     "MENU - show this menu\n" +
     "EXIT - end session"
   );
@@ -148,6 +149,11 @@ async function handleInboundMessage(waId, message) {
     } else if (sessionStore.needsTimeoutWarning(session)) {
       replies.push("⏰ Reminder: your session will pause soon due to inactivity. Reply to keep it active.");
     }
+  }
+
+  // --- RESETAGENT: self-service agent reset (accessible to all registered users, only their own number) ---
+  if (upper === "RESETAGENT") {
+    return handleResetAgent(waId, session, replies);
   }
 
   // --- Global commands (active at any point, SOW 1.7) ---
@@ -529,6 +535,30 @@ function handleGlobalCommand(waId, agent, session, cmd, replies) {
   }
 }
 
+/**
+ * Self-service agent reset — allows any registered user to remove their OWN
+ * registration and re-register with a new survey track. Each user can only
+ * reset their own number (identified by waId), preventing mass resets.
+ * (SOW 2.7 extension - Self-service re-registration)
+ */
+async function handleResetAgent(waId, session, replies) {
+  // Only allow reset of the current user's own number (waId)
+  // clearAgent is called with the caller's waId, ensuring no other numbers can be reset
+  const success = await agentStore.clearAgent(waId);
+  if (success) {
+    sessionStore.clear(waId); // Clear only this user's sessions
+    clearRegistrationState(waId); // Clear only this user's registration state
+    replies.push(
+      "✅ Your agent registration has been removed. Type HELP or reply to register again with a new survey track."
+    );
+  } else {
+    replies.push(
+      "⚠️ Failed to reset your registration. Please contact your supervisor for assistance."
+    );
+  }
+  return replies;
+}
+
 async function handleAdminCommand(waId, agent, session, cmd, replies) {
   switch (cmd) {
     case "REPORT":
@@ -540,21 +570,6 @@ async function handleAdminCommand(waId, agent, session, cmd, replies) {
     case "STATS":
       replies.push("Your personal stats will be sent shortly. (Wire this up to a Sheets lookup filtered by your agent ID.)");
       return replies;
-    case "RESETAGENT": {
-      // Clear agent registration to allow re-registration with new survey track
-      const success = await agentStore.clearAgent(waId);
-      if (success) {
-        sessionStore.clear(waId); // Also clear any active sessions
-        replies.push(
-          `✅ Your agent registration has been reset. Type START or reply to register again with a new survey track.`
-        );
-      } else {
-        replies.push(
-          `⚠️ Failed to reset agent registration. Please contact your supervisor for assistance.`
-        );
-      }
-      return replies;
-    }
     default:
       replies.push("Unknown admin command.");
       return replies;
