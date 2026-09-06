@@ -24,7 +24,8 @@ function newSession(waId) {
     retryCount: 0,
     backCount: 0,
     offTopicStreak: 0,
-    editingField: null, // set when EDIT flow is active
+    editingField: null,
+    skuLoop: null,
   };
   sessions.set(waId, session);
   return session;

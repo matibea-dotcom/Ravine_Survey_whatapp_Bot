@@ -1,17 +1,12 @@
 // Central registry of survey tracks. Add a new track by creating
 // src/surveys/<key>.js (same shape as gt.js/mt.js) and adding it to TRACKS
-// below — nothing else in the engine needs to change.
+// below — nothing else in engine.js needs to change.
 
 const gt = require("./gt");
 const mt = require("./mt");
 const insurance = require("./insurance");
 
-const TRACKS = {
-  GT: gt,
-  MT: mt,
-  INSURANCE: insurance,
-};
-
+const TRACKS = { GT: gt, MT: mt, INSURANCE: insurance };
 const TRACK_ORDER = ["GT", "MT", "INSURANCE"];
 
 function trackLabel(key) {
@@ -24,6 +19,14 @@ function trackOptionsPrompt() {
 
 function trackKeyFromIndex(idx) {
   return TRACK_ORDER[idx - 1] || null;
+}
+
+function trackKeyFromArg(arg) {
+  const trimmed = String(arg).trim();
+  const numeric = Number(trimmed);
+  if (Number.isInteger(numeric)) return trackKeyFromIndex(numeric);
+  const upperArg = trimmed.toUpperCase();
+  return TRACK_ORDER.includes(upperArg) ? upperArg : null;
 }
 
 function getSurveyStepsForTrack(track) {
@@ -39,9 +42,9 @@ function getSheetTabForTrack(track) {
   return process.env[cfg.sheetTabEnvVar] || cfg.defaultSheetTab;
 }
 
-// ---- Registration steps: shared identity fields + a track-selection step ----
-// This runs once per new WhatsApp number, same as before, with one extra
-// question appended at the end.
+// ---- Registration: shared identity fields + a track-selection step ----
+// Runs once per new WhatsApp number. Field keys (fullName, agentId, region,
+// companyName) match what's already in your Agents sheet tab exactly.
 const REGISTRATION_STEPS = [
   { key: "fullName", label: "Full Name", type: "text", prompt: "Welcome! Let's get you set up. What is your *full name*?" },
   { key: "agentId", label: "Employee/Agent ID", type: "text", prompt: "Thanks. What is your *Employee/Agent ID*?", opts: { max: 20, titleCase: false } },
@@ -50,18 +53,10 @@ const REGISTRATION_STEPS = [
   {
     key: "surveyTrack",
     label: "Survey Track",
-    type: "trackSelect", // handled specially in engine.js registration flow
+    type: "trackSelect", // handled specially in engine.js's registration flow
     prompt: `Last step — which survey will you be completing?\n${trackOptionsPrompt()}`,
   },
 ];
-
-function trackKeyFromArg(arg) {
-  const trimmed = String(arg).trim();
-  const numeric = Number(trimmed);
-  if (Number.isInteger(numeric)) return trackKeyFromIndex(numeric);
-  const upperArg = trimmed.toUpperCase();
-  return TRACK_ORDER.includes(upperArg) ? upperArg : null;
-}
 
 module.exports = {
   TRACKS,

@@ -1,15 +1,14 @@
-// MT (Modern Trade) survey — built from the recurring issues raised in the
-// GT weekly reports, MT weekly status reports, field report, and consultancy
-// close-out: product availability/stockouts, Digital Path ordering-account
-// status, collections/credit discipline, merchandising execution,
-// competitor shelf pressure, and short-expiry stock management.
+// MT (Modern Trade) survey — built from the recurring issues in the Ravine
+// Dairies reports: stockouts, Digital Path ordering status, collections/
+// credit discipline, merchandising, competitor shelf pressure, short-expiry
+// stock. Kept at a similar level of detail to GT, without a SKU-price loop
+// for now — easy to add later (mirror gt.js's productXSkusAvailable pattern)
+// if you want per-SKU MT pricing too.
 
 const PRODUCT_X_NAME = process.env.PRODUCT_X_NAME || "Product X";
 
 const STOCK_STATUS_OPTIONS = ["Fully Stocked", "Partially Stocked", "Out of Stock (OOS)"];
-
 const DIGITAL_PATH_STATUS_OPTIONS = ["Active / Working", "Disabled / Closed", "Not Used at This Account"];
-
 const MERCHANDISING_DISPLAY_TYPES = [
   "Shelf Display",
   "Floor Stand",
@@ -18,7 +17,6 @@ const MERCHANDISING_DISPLAY_TYPES = [
   "Extension Cooler",
   "None",
 ];
-
 const PAYMENT_STATUS_OPTIONS = [
   "Current / Up to Date",
   "Overdue (1-7 days)",
@@ -62,9 +60,7 @@ const SURVEY_STEPS = [
     label: "Stock Availability",
     type: "select",
     required: true,
-    prompt:
-      "What is the current *stock availability* at this account?\n" +
-      STOCK_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    prompt: "What is the current *stock availability* at this account?\n" + STOCK_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
     options: STOCK_STATUS_OPTIONS,
   },
   {
@@ -80,9 +76,7 @@ const SURVEY_STEPS = [
     label: "Digital Path Ordering Status",
     type: "select",
     required: true,
-    prompt:
-      "What is the status of this account's *Digital Path ordering account*?\n" +
-      DIGITAL_PATH_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    prompt: "What is the status of this account's *Digital Path ordering account*?\n" + DIGITAL_PATH_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
     options: DIGITAL_PATH_STATUS_OPTIONS,
   },
   {
@@ -90,8 +84,7 @@ const SURVEY_STEPS = [
     label: "Digital Path Issue Detail",
     type: "comments",
     required: false,
-    prompt:
-      "Briefly describe the *Digital Path issue* (e.g. account disabled due to overdue payment, naming mismatch, system glitch), or SKIP.",
+    prompt: "Briefly describe the *Digital Path issue* (e.g. account disabled due to overdue payment, naming mismatch, system glitch), or SKIP.",
     skipIf: (a) => a.digitalPathStatus === "Active / Working",
   },
   {
@@ -107,9 +100,7 @@ const SURVEY_STEPS = [
     label: "Merchandising (Own)",
     type: "select",
     required: true,
-    prompt:
-      "What *own-brand merchandising* is present?\n" +
-      MERCHANDISING_DISPLAY_TYPES.map((d, i) => `${i + 1}. ${d}`).join("\n"),
+    prompt: "What *own-brand merchandising* is present?\n" + MERCHANDISING_DISPLAY_TYPES.map((d, i) => `${i + 1}. ${d}`).join("\n"),
     options: MERCHANDISING_DISPLAY_TYPES,
   },
   {
@@ -141,9 +132,7 @@ const SURVEY_STEPS = [
     label: "Account Payment Status",
     type: "select",
     required: true,
-    prompt:
-      "What is this account's *payment status*?\n" +
-      PAYMENT_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    prompt: "What is this account's *payment status*?\n" + PAYMENT_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
     options: PAYMENT_STATUS_OPTIONS,
     crossValidate: (value, a) => {
       if (value !== "Current / Up to Date") {
@@ -190,12 +179,10 @@ const SURVEY_STEPS = [
     label: "Comments",
     type: "comments",
     required: false,
-    prompt:
-      "Any other *comments*? Handover status, system access issues, customer feedback — max 500 characters, or SKIP.",
+    prompt: "Any other *comments*? Handover status, system access issues, customer feedback — max 500 characters, or SKIP.",
   },
 ];
 
-// Column order for the MT Google Sheet tab.
 const COLUMNS = [
   "referenceNumber",
   "submittedAt",

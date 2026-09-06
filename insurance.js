@@ -1,5 +1,5 @@
 // Insurance survey — placeholder. Track is registerable now so agents can be
-// pointed here later without re-registering; question set to follow.
+// pointed here later without re-registering; real question set to follow.
 
 const SURVEY_STEPS = [
   {

@@ -1,8 +1,23 @@
-// GT (General Trade) survey — unchanged from the original survey.js.
+// GT (General Trade) survey — reconstructed to match the real column headers
+// from your live Submissions tab. Wording/options for soldInStatus,
+// notStockedReason, and stockOutFrequency are my best reconstruction since I
+// didn't have the exact original prompts — tweak freely, the *keys* are what
+// matter for the Sheets columns to line up.
+
 const PRODUCT_X_NAME = process.env.PRODUCT_X_NAME || "Product X";
 
-const COMPETITOR_CATEGORIES = ["Category A", "Category B", "Category C", "Other"];
+// These four are the SKU pricing columns visible in your sheet header.
+const PRODUCT_X_SKUS = [
+  "250ml Full Cream UHT",
+  "500ml Full Cream UHT",
+  "1L Full Cream UHT",
+  "500ml Low Fat UHT",
+];
 
+const SOLD_IN_STATUS_OPTIONS = ["Sold In", "Not Stocked", "Discontinued"];
+const STOCK_OUT_FREQUENCY_OPTIONS = ["Never", "Rarely", "Sometimes", "Often", "Always Out of Stock"];
+
+const COMPETITOR_CATEGORIES = ["Category A", "Category B", "Category C", "Other"];
 const COMPETITOR_PRODUCTS_BY_CATEGORY = {
   "Category A": ["Brand A1", "Brand A2", "Brand A3", "Brand A4", "Brand A5", "Other"],
   "Category B": ["Brand B1", "Brand B2", "Brand B3", "Brand B4", "Brand B5", "Other"],
@@ -18,17 +33,7 @@ const MERCHANDISING_DISPLAY_TYPES = [
   "None",
 ];
 
-const SOLD_IN_STATUS_OPTIONS = ["Sold In", "Seeding", "Not Stocked", "Discontinued"];
-
-const DELIVERY_DAYS = [
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-  "Sunday",
-];
+const DELIVERY_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 const SURVEY_STEPS = [
   {
@@ -62,36 +67,51 @@ const SURVEY_STEPS = [
     prompt: "📍 Please share the store's *location pin*, or type the address if you can't share a pin.",
   },
   {
-    key: "productXAvailable",
-    label: `${PRODUCT_X_NAME} Available`,
+    key: "soldInStatus",
+    label: "Sold In Status",
+    type: "select",
+    required: true,
+    prompt: `What is the *sold-in status* of ${PRODUCT_X_NAME} here?\n` + SOLD_IN_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    options: SOLD_IN_STATUS_OPTIONS,
+  },
+  {
+    key: "notStockedReason",
+    label: "Reason Not Stocked",
+    type: "comments",
+    required: false,
+    prompt: "Why isn't it currently stocked here? (or SKIP)",
+    skipIf: (a) => a.soldInStatus === "Sold In",
+  },
+  {
+    key: "willingToStock",
+    label: "Willing to Stock",
     type: "select",
     required: false,
-    prompt: `Is *${PRODUCT_X_NAME}* available in this store?\n1. Yes\n2. No`,
+    prompt: "Would this store be *willing to stock* it going forward?\n1. Yes\n2. No",
     options: ["Yes", "No"],
+    skipIf: (a) => a.soldInStatus === "Sold In",
   },
   {
-    key: "productXWsPrice",
-    label: `${PRODUCT_X_NAME} W/S Price`,
-    type: "numeric",
+    key: "productXSkusAvailable",
+    label: "SKUs Available",
+    type: "multiselect",
     required: false,
-    prompt: `What is the *wholesale price* of ${PRODUCT_X_NAME}? (numbers only, or SKIP)`,
-    opts: { allowZero: false },
-    skipIf: (a) => a.productXAvailable !== "Yes",
+    prompt:
+      `Which *${PRODUCT_X_NAME} SKUs* are available here? Reply with numbers, comma/space separated, or SKIP:\n` +
+      PRODUCT_X_SKUS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    options: PRODUCT_X_SKUS,
+    skipIf: (a) => a.soldInStatus !== "Sold In",
+    // engine.js's SKU pricing loop triggers automatically off this exact key.
   },
   {
-    key: "productXRrp",
-    label: `${PRODUCT_X_NAME} RRP`,
-    type: "numeric",
-    required: false,
-    prompt: `What is the *recommended retail price (RRP)* of ${PRODUCT_X_NAME}? (numbers only, or SKIP)`,
-    opts: { allowZero: false },
-    skipIf: (a) => a.productXAvailable !== "Yes",
-    crossValidate: (value, a) => {
-      if (a.productXWsPrice != null && value < a.productXWsPrice) {
-        return { flagged: true, note: "RRP is lower than wholesale price — flagged for review." };
-      }
-      return { flagged: false };
-    },
+    key: "stockOutFrequency",
+    label: "Stock-Out Frequency",
+    type: "select",
+    required: true,
+    prompt:
+      "How often does this store *run out of stock*?\n" +
+      STOCK_OUT_FREQUENCY_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    options: STOCK_OUT_FREQUENCY_OPTIONS,
   },
   {
     key: "competitorCategory",
@@ -151,9 +171,7 @@ const SURVEY_STEPS = [
     label: "Merchandising (Own)",
     type: "select",
     required: true,
-    prompt:
-      "What *own-brand merchandising* is present?\n" +
-      MERCHANDISING_DISPLAY_TYPES.map((d, i) => `${i + 1}. ${d}`).join("\n"),
+    prompt: "What *own-brand merchandising* is present?\n" + MERCHANDISING_DISPLAY_TYPES.map((d, i) => `${i + 1}. ${d}`).join("\n"),
     options: MERCHANDISING_DISPLAY_TYPES,
   },
   {
@@ -183,14 +201,6 @@ const SURVEY_STEPS = [
     opts: { min: 2, max: 50 },
   },
   {
-    key: "soldInStatus",
-    label: "Sold In Status",
-    type: "select",
-    required: true,
-    prompt: "What is the *sold-in status*?\n" + SOLD_IN_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
-    options: SOLD_IN_STATUS_OPTIONS,
-  },
-  {
     key: "deliveryDays",
     label: "Delivery Days",
     type: "multiselect",
@@ -206,12 +216,12 @@ const SURVEY_STEPS = [
     label: "Comments",
     type: "comments",
     required: false,
-    prompt:
-      "Any *comments*? Competitor activity, promotions, trends, store feedback — max 500 characters, or SKIP.",
+    prompt: "Any *comments*? Competitor activity, promotions, trends, store feedback — max 500 characters, or SKIP.",
   },
 ];
 
-// Column order for the GT Google Sheet tab.
+// Column order — matches your live "Submissions" tab header exactly,
+// including one WS/RRP pair per SKU (filled in by the SKU pricing loop).
 const COLUMNS = [
   "referenceNumber",
   "submittedAt",
@@ -228,9 +238,12 @@ const COLUMNS = [
   "gpsLng",
   "gpsAddress",
   "gpsSource",
-  "productXAvailable",
-  "productXWsPrice",
-  "productXRrp",
+  "soldInStatus",
+  "notStockedReason",
+  "willingToStock",
+  "productXSkusAvailable",
+  ...PRODUCT_X_SKUS.flatMap((sku) => [`${sku} WS`, `${sku} RRP`]),
+  "stockOutFrequency",
   "competitorCategory",
   "competitorProducts",
   "competitorWsPrice",
@@ -239,7 +252,6 @@ const COLUMNS = [
   "merchandisingCompetitor",
   "distributorName",
   "distributorAgentName",
-  "soldInStatus",
   "deliveryDays",
   "comments",
   "flags",
@@ -248,13 +260,15 @@ const COLUMNS = [
 module.exports = {
   label: "General Trade (GT)",
   sheetTabEnvVar: "GOOGLE_SHEET_TAB_GT",
-  defaultSheetTab: "GT_Submissions",
+  defaultSheetTab: "Submissions", // keeps writing to your existing tab — no migration needed
   SURVEY_STEPS,
   COLUMNS,
   PRODUCT_X_NAME,
+  PRODUCT_X_SKUS,
+  SOLD_IN_STATUS_OPTIONS,
+  STOCK_OUT_FREQUENCY_OPTIONS,
   COMPETITOR_CATEGORIES,
   COMPETITOR_PRODUCTS_BY_CATEGORY,
   MERCHANDISING_DISPLAY_TYPES,
-  SOLD_IN_STATUS_OPTIONS,
   DELIVERY_DAYS,
 };

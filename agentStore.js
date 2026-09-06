@@ -1,94 +1,105 @@
-// Lightweight file-backed registry so registered agents survive a restart.
-// Swap for a real database table (or a Google Sheet "Agents" tab) at scale.
-const fs = require("fs");
-const path = require("path");
+// Agent registry — backed by a Google Sheets tab ("Agents" by default) so
+// registrations survive Render redeploys/restarts (Render's free tier has no
+// persistent disk; anything written to the local filesystem is wiped on every
+// new deploy or restart). A small in-memory cache avoids hitting the Sheets
+// API on every single message.
+const sheets = require("./sheets");
 
-const FILE = path.join(__dirname, "..", "data", "agents.json");
+let cache = null; // Map<waId, agent> once loaded; null means "not loaded yet"
+let loadingPromise = null;
 
-function ensureStorageReady() {
-  try {
-    const dir = path.dirname(FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    // Check if file exists; if not, create empty agents object
-    if (!fs.existsSync(FILE)) {
-      fs.writeFileSync(FILE, JSON.stringify({}, null, 2));
-    }
-  } catch (err) {
-    console.error("Error initializing agent storage:", err.response?.data || err.message || err);
-    throw err;
-  }
+async function loadCache() {
+  if (cache) return cache;
+  if (loadingPromise) return loadingPromise;
+  loadingPromise = sheets.readAllAgents().then((agents) => {
+    cache = new Map(agents.map((a) => [a.waId, a]));
+    loadingPromise = null;
+    return cache;
+  });
+  return loadingPromise;
 }
 
-function load() {
-  try {
-    ensureStorageReady();
-    return JSON.parse(fs.readFileSync(FILE, "utf8"));
-  } catch (err) {
-    console.error("Error loading agents from file:", err.response?.data || err.message || err);
-    return {};
-  }
+async function getAgent(waId) {
+  const map = await loadCache();
+  return map.get(waId) || null;
 }
 
-function saveAll(agents) {
-  try {
-    ensureStorageReady();
-    fs.writeFileSync(FILE, JSON.stringify(agents, null, 2));
-  } catch (err) {
-    console.error("Error saving agents to file:", err.response?.data || err.message || err);
-    throw err;
-  }
+/**
+ * Startup pre-flight check — called once when the server boots (see
+ * server.js). Confirms the Agents Google Sheet tab is actually reachable
+ * (service account access, sheet ID, network) before the server starts
+ * accepting webhook traffic, so misconfiguration fails loudly at deploy
+ * time instead of silently on someone's first registration attempt.
+ */
+async function ensureStorageReady() {
+  await loadCache();
 }
 
-function getAgent(waId) {
-  const agents = load();
-  return agents[waId] || null;
+async function registerAgent(waId, profile) {
+  const agent = { ...profile, waId, registeredAt: new Date().toISOString() };
+  await sheets.appendAgent(agent);
+  const map = await loadCache();
+  map.set(waId, agent);
+  return agent;
 }
 
-function registerAgent(waId, profile) {
-  const agents = load();
-  agents[waId] = { ...profile, waId, registeredAt: new Date().toISOString() };
-  saveAll(agents);
-  return agents[waId];
+/**
+ * Patches an existing agent's fields (e.g. surveyTrack) without re-appending
+ * a duplicate row. Updates the Sheets backend and the in-memory cache.
+ * Returns null if the agent isn't registered.
+ */
+async function updateAgent(waId, patch) {
+  const map = await loadCache();
+  const existing = map.get(waId);
+  if (!existing) return null;
+  const updated = { ...existing, ...patch, waId };
+  await sheets.updateAgentRow(updated);
+  map.set(waId, updated);
+  return updated;
 }
 
-// Patches an existing agent's fields (e.g. surveyTrack) without touching
-// registeredAt or anything else already on file. Returns null if the agent
-// isn't registered.
-function updateAgent(waId, patch) {
-  const agents = load();
-  if (!agents[waId]) return null;
-  agents[waId] = { ...agents[waId], ...patch, waId };
-  saveAll(agents);
-  return agents[waId];
-}
-
-// Looks up an agent by phone number for admin commands (SETTRACK etc.),
-// tolerant of a leading "+" since agents are keyed by the bare WhatsApp id.
-function findAgentByPhone(rawNumber) {
+/**
+ * Looks up an agent by phone number for admin commands (SETTRACK etc.),
+ * tolerant of a leading "+" since agents are keyed by the bare WhatsApp id.
+ */
+async function findAgentByPhone(rawNumber) {
   const digits = String(rawNumber).replace(/[^\d]/g, "");
-  const agents = load();
-  return agents[digits] ? { waId: digits, ...agents[digits] } : null;
+  return getAgent(digits);
 }
 
-// Clears a specific agent by WhatsApp ID so they can re-register afresh.
-// Does not touch Google Sheets submissions — only local registration state.
-// Returns true if agent was found and removed, false if not found.
-function clearAgent(waId) {
-  const agents = load();
-  if (!agents[waId]) {
+/**
+ * Clear an agent from the system to allow re-registration.
+ * Removes from both the Sheets backend and in-memory cache.
+ * (SOW 2.7 extension — allows agents to change survey tracks)
+ */
+async function clearAgent(waId) {
+  try {
+    await sheets.deleteAgent(waId);
+    const map = await loadCache();
+    map.delete(waId);
+    return true;
+  } catch (err) {
+    console.error("Failed to clear agent:", err.message);
     return false;
   }
-  delete agents[waId];
-  saveAll(agents);
-  return true;
 }
 
-// Wipes every registered agent so the bot starts fresh. Does not touch
-// Google Sheets submissions — only local registration state.
-function clearAllAgents() {
-  saveAll({});
+/**
+ * Wipes every registered agent so the bot starts fresh. Does not touch
+ * Google Sheets submissions — only the Agents tab. Used by the admin-only
+ * RESETAGENTS command (two-step confirm lives in engine.js).
+ */
+async function clearAllAgents() {
+  const map = await loadCache();
+  const waIds = [...map.keys()];
+  for (const waId of waIds) {
+    try {
+      await sheets.deleteAgent(waId);
+    } catch (err) {
+      console.error(`Failed to delete agent ${waId} during clearAllAgents:`, err.message);
+    }
+  }
+  cache = new Map();
 }
 
 function isAuthorizedAdmin(waId) {
