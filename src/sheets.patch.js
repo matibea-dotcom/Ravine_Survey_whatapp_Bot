@@ -1,1 +1,0 @@
-// rethrow errors from appendSubmission using throw err;
