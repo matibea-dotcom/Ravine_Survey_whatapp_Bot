@@ -44,9 +44,27 @@ async function getSheetIdByTitle(title) {
   return tab ? tab.properties.sheetId : null;
 }
 
+/**
+ * Creates the tab if it doesn't already exist in the spreadsheet. Sheets API
+ * throws "Unable to parse range" if you reference a tab name that isn't
+ * there yet — this is called before every read/write so new tracks (e.g. a
+ * brand-new MT_Submissions tab) get created automatically on first use
+ * instead of crashing the submission.
+ */
+async function ensureTabExists(tabName) {
+  const sheetId = await getSheetIdByTitle(tabName);
+  if (sheetId !== null) return; // already exists
+  const sheetsApi = await getClient();
+  await sheetsApi.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: { requests: [{ addSheet: { properties: { title: tabName } } }] },
+  });
+}
+
 // ---- Generic tab helpers (used by both Agents and Submissions tabs) ----
 
 async function readHeader(tabName) {
+  await ensureTabExists(tabName);
   const sheetsApi = await getClient();
   const res = await sheetsApi.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -72,13 +90,15 @@ async function writeHeader(tabName, header) {
  * existing data/columns are never reordered or removed.
  */
 async function ensureHeaderHasColumns(tabName, desiredCols) {
+  await ensureTabExists(tabName);
   let header = await readHeader(tabName);
+  const uniqueDesired = [...new Set(desiredCols)];
   if (header.length === 0) {
-    header = [...desiredCols];
+    header = uniqueDesired;
     await writeHeader(tabName, header);
     return header;
   }
-  const missing = desiredCols.filter((c) => !header.includes(c));
+  const missing = uniqueDesired.filter((c) => !header.includes(c));
   if (missing.length > 0) {
     header = [...header, ...missing];
     await writeHeader(tabName, header);
@@ -87,6 +107,7 @@ async function ensureHeaderHasColumns(tabName, desiredCols) {
 }
 
 async function readAllRows(tabName) {
+  await ensureTabExists(tabName);
   const sheetsApi = await getClient();
   const res = await sheetsApi.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -104,6 +125,7 @@ async function readAllRows(tabName) {
 }
 
 async function findRowIndexByColumn(tabName, columnName, value) {
+  await ensureTabExists(tabName);
   const sheetsApi = await getClient();
   const res = await sheetsApi.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
