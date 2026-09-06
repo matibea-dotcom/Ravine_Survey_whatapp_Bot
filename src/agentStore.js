@@ -3,7 +3,6 @@
 // persistent disk; anything written to the local filesystem is wiped on every
 // new deploy or restart). A small in-memory cache avoids hitting the Sheets
 // API on every single message.
-
 const sheets = require("./sheets");
 
 let cache = null; // Map<waId, agent> once loaded; null means "not loaded yet"
@@ -45,6 +44,30 @@ async function registerAgent(waId, profile) {
 }
 
 /**
+ * Patches an existing agent's fields (e.g. surveyTrack) without re-appending
+ * a duplicate row. Updates the Sheets backend and the in-memory cache.
+ * Returns null if the agent isn't registered.
+ */
+async function updateAgent(waId, patch) {
+  const map = await loadCache();
+  const existing = map.get(waId);
+  if (!existing) return null;
+  const updated = { ...existing, ...patch, waId };
+  await sheets.updateAgentRow(updated);
+  map.set(waId, updated);
+  return updated;
+}
+
+/**
+ * Looks up an agent by phone number for admin commands (SETTRACK etc.),
+ * tolerant of a leading "+" since agents are keyed by the bare WhatsApp id.
+ */
+async function findAgentByPhone(rawNumber) {
+  const digits = String(rawNumber).replace(/[^\d]/g, "");
+  return getAgent(digits);
+}
+
+/**
  * Clear an agent from the system to allow re-registration.
  * Removes from both the Sheets backend and in-memory cache.
  * (SOW 2.7 extension — allows agents to change survey tracks)
@@ -61,9 +84,36 @@ async function clearAgent(waId) {
   }
 }
 
+/**
+ * Wipes every registered agent so the bot starts fresh. Does not touch
+ * Google Sheets submissions — only the Agents tab. Used by the admin-only
+ * RESETAGENTS command (two-step confirm lives in engine.js).
+ */
+async function clearAllAgents() {
+  const map = await loadCache();
+  const waIds = [...map.keys()];
+  for (const waId of waIds) {
+    try {
+      await sheets.deleteAgent(waId);
+    } catch (err) {
+      console.error(`Failed to delete agent ${waId} during clearAllAgents:`, err.message);
+    }
+  }
+  cache = new Map();
+}
+
 function isAuthorizedAdmin(waId) {
   const admins = (process.env.ADMIN_WA_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
   return admins.includes(waId);
 }
 
-module.exports = { getAgent, registerAgent, clearAgent, isAuthorizedAdmin, ensureStorageReady };
+module.exports = {
+  getAgent,
+  registerAgent,
+  updateAgent,
+  findAgentByPhone,
+  clearAgent,
+  clearAllAgents,
+  isAuthorizedAdmin,
+  ensureStorageReady,
+};

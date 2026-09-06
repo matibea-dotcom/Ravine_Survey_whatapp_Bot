@@ -24,7 +24,8 @@ function newSession(waId) {
     retryCount: 0,
     backCount: 0,
     offTopicStreak: 0,
-    editingField: null, // set when EDIT flow is active
+    editingField: null,
+    skuLoop: null,
   };
   sessions.set(waId, session);
   return session;
@@ -73,6 +74,10 @@ function clear(waId) {
   sessions.delete(waId);
 }
 
+function clearAll() {
+  sessions.clear();
+}
+
 module.exports = {
   newSession,
   get,
@@ -82,6 +87,7 @@ module.exports = {
   needsTimeoutWarning,
   hasTimedOut,
   clear,
+  clearAll,
   TIMEOUT_MIN,
   WARNING_MIN,
   RESUME_HOURS,

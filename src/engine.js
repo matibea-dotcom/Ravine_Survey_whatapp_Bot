@@ -2,13 +2,21 @@ const sessionStore = require("./sessionStore");
 const agentStore = require("./agentStore");
 const validators = require("./validators");
 const sheets = require("./sheets");
-const { REGISTRATION_STEPS, SURVEY_STEPS } = require("./survey");
+const {
+  REGISTRATION_STEPS,
+  TRACK_ORDER,
+  trackLabel,
+  trackOptionsPrompt,
+  trackKeyFromIndex,
+  trackKeyFromArg,
+  getSurveyStepsForTrack,
+} = require("./surveys");
 
 const MAX_RETRIES = 3;
 const MAX_BACK = 5;
 const GLOBAL_COMMANDS = [
   "HELP", "BACK", "MENU", "SAVE", "RESUME", "CANCEL", "STATUS",
-  "RESTART", "EXIT", "SUMMARY", "STOP", "RESETAGENT",
+  "RESTART", "EXIT", "SUMMARY",
 ];
 const SURVEY_COMMANDS = ["START", "SKIP", "EDIT", "SUBMIT", "CONFIRM"];
 const ADMIN_COMMANDS = ["REPORT", "MYDATA", "STATS"];
@@ -22,7 +30,11 @@ function getRawText(message) {
   return message.type === "text" ? message.text.body : "";
 }
 
-// --- Off-topic detection (reserved for future use / production edge cases) ---
+// --- Off-topic detection (reserved for future use — not currently called
+// internally, but kept intentionally per prior commit for an upcoming
+// smarter off-topic classifier to replace the simple streak-counter in
+// handleOffTopicOrIdle below). Not exported, so nothing outside this file
+// can call it either way. ---
 function isOffTopic(text) {
   const t = text.trim().toUpperCase();
   if (GLOBAL_COMMANDS.includes(t) || SURVEY_COMMANDS.includes(t) || ADMIN_COMMANDS.includes(t)) {
@@ -31,27 +43,49 @@ function isOffTopic(text) {
   return false;
 }
 
+// --- Admin gate: checks authorization and pushes the standard refusal
+// message if not, so every admin-only command can do `if (!requireAdmin(...))
+// return replies;` instead of repeating the same 3-line check. ---
+function requireAdmin(waId, replies) {
+  if (!agentStore.isAuthorizedAdmin(waId)) {
+    replies.push("That command is only available to authorized users.");
+    return false;
+  }
+  return true;
+}
+
 // --- Duplicate detection (SOW 2.4) ---
-function recordSubmissionForDupeCheck(waId, retailerName) {
+// GT dedupes on retailerName, MT on accountName — fall back to whichever is
+// present so this works across tracks without each track's own code change.
+function submissionDupeKey(answers) {
+  return answers.retailerName || answers.accountName || "";
+}
+
+function recordSubmissionForDupeCheck(waId, dupeKey) {
   const list = recentSubmissions.get(waId) || [];
-  list.push({ retailerName: retailerName.toLowerCase(), at: Date.now() });
+  list.push({ dupeKey: dupeKey.toLowerCase(), at: Date.now() });
   recentSubmissions.set(waId, list.filter((e) => Date.now() - e.at < 24 * 3600 * 1000));
 }
 
-function findRecentDuplicate(waId, retailerName) {
+function findRecentDuplicate(waId, dupeKey) {
+  if (!dupeKey) return null;
   const list = recentSubmissions.get(waId) || [];
   return list.find(
-    (e) => e.retailerName === retailerName.toLowerCase() && Date.now() - e.at < 4 * 3600 * 1000
+    (e) => e.dupeKey === dupeKey.toLowerCase() && Date.now() - e.at < 4 * 3600 * 1000
   );
 }
 
-// --- Survey step navigation ---
-function activeSteps(answers) {
-  return SURVEY_STEPS.filter((s) => !(s.skipIf && s.skipIf(answers)));
+// --- Survey step navigation (track-aware) ---
+function surveyStepsFor(session) {
+  return getSurveyStepsForTrack(session.track);
+}
+
+function activeSteps(session) {
+  return surveyStepsFor(session).filter((s) => !(s.skipIf && s.skipIf(session.answers)));
 }
 
 function currentStep(session) {
-  const steps = activeSteps(session.answers);
+  const steps = activeSteps(session);
   return steps[session.stepIndex] || null;
 }
 
@@ -64,7 +98,7 @@ function stepOptions(step, answers) {
 }
 
 function progressLine(session) {
-  const steps = activeSteps(session.answers);
+  const steps = activeSteps(session);
   return `Step ${session.stepIndex + 1} of ${steps.length}`;
 }
 
@@ -90,14 +124,16 @@ function helpText(registered) {
     "CANCEL - cancel this survey\n" +
     "RESTART - start this survey over\n" +
     "SUBMIT - submit completed survey\n" +
-    "RESETAGENT - reset your registration\n" +
+    "RESETAGENT - remove your registration entirely (re-register from scratch)\n" +
+    "MYTRACK - show your current survey track\n" +
+    "SWITCHTRACK <track> - change your survey track (e.g. SWITCHTRACK MT)\n" +
     "MENU - show this menu\n" +
     "EXIT - end session"
   );
 }
 
 function summaryText(session) {
-  const steps = activeSteps(session.answers);
+  const steps = activeSteps(session);
   const lines = steps
     .filter((s) => session.answers[s.key] !== undefined)
     .map((s) => {
@@ -132,7 +168,8 @@ function promptForCurrentOrSummary(session) {
   return [`${stepPrompt(step, session.answers)}\n\n${progressLine(session)}`];
 }
 
-// --- SKU Loop (Ravine UHT) ---
+// --- SKU Loop (works the same regardless of track, driven by whichever
+// step's key triggers it — see the bottom of handleInboundMessage) ---
 function promptForSkuLoopOrContinue(session) {
   const loop = session.skuLoop;
   if (loop.index >= loop.skus.length) {
@@ -251,9 +288,10 @@ function handleGlobalCommand(waId, agent, session, cmd, replies) {
         sessionStore.clear(waId);
         replies.push("Your saved survey expired. Type START to begin a new one.");
       } else {
+        if (!session.track) session.track = agent.surveyTrack || "GT";
         sessionStore.touch(session);
         const step = currentStep(session);
-        replies.push(`Resuming survey (Ref: ${session.sessionId}).\n\n${stepPrompt(step, session.answers)}\n\n${progressLine(session)}`);
+        replies.push(`Resuming ${trackLabel(session.track)} survey (Ref: ${session.sessionId}).\n\n${stepPrompt(step, session.answers)}\n\n${progressLine(session)}`);
       }
       return;
     case "CANCEL":
@@ -264,10 +302,12 @@ function handleGlobalCommand(waId, agent, session, cmd, replies) {
         replies.push("No active survey to cancel.");
       }
       return;
-    case "RESTART":
+    case "RESTART": {
       const fresh = sessionStore.newSession(waId);
-      replies.push(`Survey restarted (Ref: ${fresh.sessionId}).\n\n${stepPrompt(currentStep(fresh), fresh.answers)}\n\n${progressLine(fresh)}`);
+      fresh.track = agent.surveyTrack || "GT";
+      replies.push(`${trackLabel(fresh.track)} survey restarted (Ref: ${fresh.sessionId}).\n\n${stepPrompt(currentStep(fresh), fresh.answers)}\n\n${progressLine(fresh)}`);
       return;
+    }
     case "EXIT":
       if (session) sessionStore.pause(session);
       replies.push("Session ended. Your progress (if any) is saved. Type RESUME or START any time.");
@@ -278,7 +318,7 @@ function handleGlobalCommand(waId, agent, session, cmd, replies) {
 }
 
 // --- Admin command handler ---
-async function handleAdminCommand(waId, agent, session, cmd, replies) {
+async function handleAdminCommand(cmd, replies) {
   switch (cmd) {
     case "REPORT":
       replies.push("A summary report request has been logged. Your supervisor will receive it shortly.");
@@ -295,7 +335,7 @@ async function handleAdminCommand(waId, agent, session, cmd, replies) {
   }
 }
 
-// --- Self-service agent reset ---
+// --- Self-service: fully remove your own registration (re-register from scratch) ---
 async function handleResetAgent(waId, session, replies) {
   const success = await agentStore.clearAgent(waId);
   if (success) {
@@ -310,7 +350,8 @@ async function handleResetAgent(waId, session, replies) {
 
 // --- Submit handlers ---
 async function handleSubmit(waId, agent, session, replies) {
-  const missing = SURVEY_STEPS.filter(
+  const steps = surveyStepsFor(session);
+  const missing = steps.filter(
     (s) => s.required && !s.skipIf?.(session.answers) && session.answers[s.key] === undefined
   );
   if (missing.length > 0) {
@@ -322,10 +363,11 @@ async function handleSubmit(waId, agent, session, replies) {
     return replies;
   }
 
-  const dupe = findRecentDuplicate(waId, session.answers.retailerName);
+  const dupeKey = submissionDupeKey(session.answers);
+  const dupe = findRecentDuplicate(waId, dupeKey);
   if (dupe && !session.dupeConfirmed) {
     replies.push(
-      `⚠️ You already submitted a survey for *${session.answers.retailerName}* recently. Is this a new visit?\n` +
+      `⚠️ You already submitted a survey for *${dupeKey}* recently. Is this a new visit?\n` +
         "Reply CONFIRM to submit anyway, or CANCEL to discard."
     );
     session.pendingSubmit = true;
@@ -341,11 +383,11 @@ async function handleSubmit(waId, agent, session, replies) {
 async function finalizeSubmit(waId, agent, session, replies) {
   const referenceNumber = `REF-${Date.now().toString(36).toUpperCase()}`;
   session.flags = session.flags || [];
-  
+
   const elapsedMin = (Date.now() - session.createdAt) / 60000;
   if (elapsedMin < 2) session.flags.push("Survey completed in under 2 minutes.");
-  
-  ["retailerName", "contactName"].forEach((k) => {
+
+  ["retailerName", "accountName", "contactName"].forEach((k) => {
     if (session.answers[k] && validators.isGenericTestValue(session.answers[k])) {
       session.flags.push(`Generic/test value detected for ${k}.`);
     }
@@ -355,6 +397,7 @@ async function finalizeSubmit(waId, agent, session, replies) {
     referenceNumber,
     submittedAt: new Date().toISOString(),
     sessionId: session.sessionId,
+    track: session.track,
     agent,
     answers: session.answers,
     flags: session.flags,
@@ -362,7 +405,7 @@ async function finalizeSubmit(waId, agent, session, replies) {
 
   try {
     await sheets.appendSubmission(submission);
-    recordSubmissionForDupeCheck(waId, session.answers.retailerName);
+    recordSubmissionForDupeCheck(waId, submissionDupeKey(session.answers));
     session.status = "submitted";
     session.pendingSubmit = false;
     replies.push(`✅ Survey submitted! Reference: *${referenceNumber}*\n\nThank you, ${agent.fullName}. Type START to begin another survey.`);
@@ -389,20 +432,36 @@ async function handleRegistration(waId, message, replies) {
   }
 
   const step = REGISTRATION_STEPS[regState.index];
-  const result = validators.validateText(raw, step.opts || { min: 1, max: 50 });
-  if (!result.ok) {
-    replies.push(result.error);
-    return replies;
-  }
 
-  regState.answers[step.key] = result.value;
-  regState.index += 1;
-  saveRegistrationState(waId, regState);
+  // The track-selection step is a numbered select, not free text.
+  if (step.type === "trackSelect") {
+    const idx = Number(raw.trim());
+    const trackKey = trackKeyFromIndex(idx);
+    if (!trackKey) {
+      replies.push(`Please reply with a number from 1 to ${TRACK_ORDER.length}.`);
+      return replies;
+    }
+    regState.answers[step.key] = trackKey;
+    regState.index += 1;
+    saveRegistrationState(waId, regState);
+  } else {
+    const result = validators.validateText(raw, step.opts || { min: 1, max: 50 });
+    if (!result.ok) {
+      replies.push(result.error);
+      return replies;
+    }
+    regState.answers[step.key] = result.value;
+    regState.index += 1;
+    saveRegistrationState(waId, regState);
+  }
 
   if (regState.index >= REGISTRATION_STEPS.length) {
     await agentStore.registerAgent(waId, regState.answers);
     clearRegistrationState(waId);
-    replies.push(`Thanks, ${regState.answers.fullName}! You're registered. Type START to begin your first store visit survey, or HELP for commands.`);
+    replies.push(
+      `Thanks, ${regState.answers.fullName}! You're registered for the *${trackLabel(regState.answers.surveyTrack)}* survey. ` +
+        "Type START to begin your first submission, or HELP for commands."
+    );
     return replies;
   }
 
@@ -414,11 +473,9 @@ async function handleRegistration(waId, message, replies) {
 function registrationState(waId) {
   return registrationStates.get(waId) || { index: 0, answers: {}, started: false };
 }
-
 function saveRegistrationState(waId, state) {
   registrationStates.set(waId, state);
 }
-
 function clearRegistrationState(waId) {
   registrationStates.delete(waId);
 }
@@ -437,6 +494,19 @@ function handleOffTopicOrIdle(waId, replies) {
   return replies;
 }
 
+// --- Shared logic for SETTRACK (admin, any agent) and SWITCHTRACK (self) —
+// resolves the track argument, applies it, and clears any in-progress
+// session so it doesn't mix old/new question sets. Returns the reply string.
+async function applyTrackChange(targetWaId, trackArg, targetLabel) {
+  const trackKey = trackKeyFromArg(trackArg);
+  if (!trackKey) {
+    return `Unrecognized track "${trackArg}". Reply with a number or key:\n${trackOptionsPrompt()}`;
+  }
+  await agentStore.updateAgent(targetWaId, { surveyTrack: trackKey });
+  sessionStore.clear(targetWaId);
+  return `✅ ${targetLabel} switched to *${trackLabel(trackKey)}*. Any in-progress survey was cleared.`;
+}
+
 /**
  * Main entry point. Returns an array of outbound message strings.
  * `message` is a normalized inbound object: { type, text?, location? }
@@ -444,6 +514,7 @@ function handleOffTopicOrIdle(waId, replies) {
 async function handleInboundMessage(waId, message) {
   const replies = [];
   const upper = getRawText(message).trim().toUpperCase();
+  const rawText = getRawText(message);
 
   // --- STOP / opt-out honored immediately (SOW 2.7) ---
   if (upper === "STOP") {
@@ -454,9 +525,68 @@ async function handleInboundMessage(waId, message) {
 
   const agent = await agentStore.getAgent(waId);
 
+  // --- Admin: wipe ALL registered agents + sessions, start fresh ---
+  // Two-step so it can't be triggered by accident. Does not touch Sheets
+  // submission data — only the Agents tab.
+  if (upper === "RESETAGENTS") {
+    if (!requireAdmin(waId, replies)) return replies;
+    replies.push(
+      "⚠️ This will permanently remove ALL registered agents and clear all active sessions. " +
+        "Everyone will need to register again (and re-pick their track) the next time they message. " +
+        "This does NOT delete anything already saved to Google Sheets submissions.\n\n" +
+        "To proceed, reply exactly: RESETAGENTS CONFIRM"
+    );
+    return replies;
+  }
+  if (upper === "RESETAGENTS CONFIRM") {
+    if (!requireAdmin(waId, replies)) return replies;
+    await agentStore.clearAllAgents();
+    sessionStore.clearAll();
+    registrationStates.clear();
+    offTopicStreaks.clear();
+    recentSubmissions.clear();
+    replies.push(
+      "✅ All registered agents and active sessions have been cleared. The bot is starting fresh — " +
+        "anyone who messages now (including you) will go through registration again."
+    );
+    return replies;
+  }
+
+  // --- Admin: fix any agent's track remotely (no shell/file access needed) ---
+  // Usage: SETTRACK <phone_number> <GT|MT|INSURANCE|1|2|3>
+  if (upper.startsWith("SETTRACK ")) {
+    if (!requireAdmin(waId, replies)) return replies;
+    const parts = rawText.trim().split(/\s+/);
+    if (parts.length < 3) {
+      replies.push(`Usage: SETTRACK <phone_number> <track>\n${trackOptionsPrompt()}`);
+      return replies;
+    }
+    const [, phoneArg, trackArg] = parts;
+    const target = await agentStore.findAgentByPhone(phoneArg);
+    if (!target) {
+      replies.push(`No registered agent found for ${phoneArg}.`);
+      return replies;
+    }
+    replies.push(await applyTrackChange(target.waId, trackArg, `${target.fullName} (${target.waId})`));
+    return replies;
+  }
+
   // --- Registration flow for first-time users (SOW 1.4) ---
   if (!agent) {
     return handleRegistration(waId, message, replies);
+  }
+
+  // --- Self-service: check or change your own track ---
+  if (upper === "MYTRACK" || upper === "WHOAMI") {
+    replies.push(`You're registered as *${agent.fullName}* on the *${trackLabel(agent.surveyTrack || "GT")}* survey.`);
+    return replies;
+  }
+  if (upper.startsWith("SWITCHTRACK ")) {
+    const arg = rawText.trim().slice("SWITCHTRACK ".length).trim();
+    const message = await applyTrackChange(waId, arg, "Your survey track");
+    agent.surveyTrack = trackKeyFromArg(arg) || agent.surveyTrack; // keep local copy in sync for the rest of this turn
+    replies.push(message + (message.startsWith("✅") ? " Type START to begin a submission." : ""));
+    return replies;
   }
 
   let session = sessionStore.get(waId);
@@ -472,25 +602,21 @@ async function handleInboundMessage(waId, message) {
     }
   }
 
-  // --- RESETAGENT: self-service reset ---
+  // --- RESETAGENT: self-service full deregistration ---
   if (upper === "RESETAGENT") {
     return handleResetAgent(waId, session, replies);
   }
 
   // --- Global commands ---
-  if (GLOBAL_COMMANDS.includes(upper) && upper !== "STOP") {
+  if (GLOBAL_COMMANDS.includes(upper)) {
     handleGlobalCommand(waId, agent, session, upper, replies);
     return replies;
   }
 
   // --- Admin commands ---
   if (ADMIN_COMMANDS.includes(upper)) {
-    if (!agentStore.isAuthorizedAdmin(waId)) {
-      replies.push("That command is only available to authorized users.");
-    } else {
-      return handleAdminCommand(waId, agent, session, upper, replies);
-    }
-    return replies;
+    if (!requireAdmin(waId, replies)) return replies;
+    return handleAdminCommand(upper, replies);
   }
 
   // --- START a new survey ---
@@ -500,13 +626,17 @@ async function handleInboundMessage(waId, message) {
       return replies;
     }
     session = sessionStore.newSession(waId);
-    replies.push(`New survey started (Ref: ${session.sessionId}). Type HELP any time for commands.\n\n${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
+    session.track = agent.surveyTrack || "GT";
+    replies.push(`New ${trackLabel(session.track)} survey started (Ref: ${session.sessionId}). Type HELP any time for commands.\n\n${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
     return replies;
   }
 
   if (!session || session.status === "cancelled" || session.status === "submitted") {
     return handleOffTopicOrIdle(waId, replies);
   }
+
+  // Sessions created before a track was assigned default to the agent's track.
+  if (!session.track) session.track = agent.surveyTrack || "GT";
 
   sessionStore.touch(session);
 
@@ -525,7 +655,7 @@ async function handleInboundMessage(waId, message) {
 
   // --- EDIT flow ---
   if (upper === "EDIT") {
-    const steps = activeSteps(session.answers).filter((s) => session.answers[s.key] !== undefined);
+    const steps = activeSteps(session).filter((s) => session.answers[s.key] !== undefined);
     if (steps.length === 0) {
       replies.push("Nothing to edit yet.");
       return replies;
@@ -536,8 +666,8 @@ async function handleInboundMessage(waId, message) {
   }
 
   if (session.editingField === "choosing") {
-    const steps = activeSteps(session.answers).filter((s) => session.answers[s.key] !== undefined);
-    const idx = Number(getRawText(message).trim());
+    const steps = activeSteps(session).filter((s) => session.answers[s.key] !== undefined);
+    const idx = Number(rawText.trim());
     if (!Number.isInteger(idx) || idx < 1 || idx > steps.length) {
       replies.push(`Please reply with a number from 1 to ${steps.length}, or CANCEL.`);
       return replies;
@@ -583,8 +713,9 @@ async function handleInboundMessage(waId, message) {
   }
 
   // --- Process answer to current step ---
+  const steps = surveyStepsFor(session);
   const targetKey = session.editingField && session.editingField !== "choosing" ? session.editingField : null;
-  const step = targetKey ? SURVEY_STEPS.find((s) => s.key === targetKey) : currentStep(session);
+  const step = targetKey ? steps.find((s) => s.key === targetKey) : currentStep(session);
 
   if (!step) {
     replies.push('Survey complete. Type SUBMIT to finish, SUMMARY to review, or EDIT to change an answer.');
@@ -634,7 +765,7 @@ async function handleInboundMessage(waId, message) {
   }
 
   // Confirm critical inputs
-  const confirmable = ["retailerName", "contactName", "contactNumber", "gpsLocation"];
+  const confirmable = ["retailerName", "accountName", "contactName", "contactNumber", "gpsLocation"];
   if (confirmable.includes(step.key)) {
     const display = step.type === "location" ? result.value.address || `${result.value.lat}, ${result.value.lng}` : result.value;
     replies.push(`Got it: *${display}*` + (flagNote ? ` (${flagNote})` : ""));
@@ -642,7 +773,8 @@ async function handleInboundMessage(waId, message) {
     replies.push(`Noted. (${flagNote})`);
   }
 
-  // SKU loop trigger
+  // SKU pricing loop trigger — works for any track whose survey defines a
+  // multiselect step with this exact key (see gt.js's productXSkusAvailable).
   if (step.key === "productXSkusAvailable" && Array.isArray(result.value) && result.value.length > 0) {
     session.skuLoop = { skus: result.value, index: 0, field: "ws" };
     replies.push(...promptForSkuLoopOrContinue(session));
