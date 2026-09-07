@@ -76,6 +76,9 @@ function normalizeInboundMessage(raw) {
   if (raw.type === "location") {
     return { type: "location", location: raw.location };
   }
+  if (raw.type === "image") {
+    return { type: "image", image: raw.image };
+  }
   return { type: "unsupported" };
 }
 
@@ -126,7 +129,7 @@ app.post("/webhook", async (req, res) => {
       if (normalized.type === "unsupported") {
         await whatsapp.sendText(
           waId,
-          "I can only process text replies and shared locations. Please type your answer or share a location pin."
+          "I can only process text replies, shared locations, and photos. Please type your answer, share a location pin, or send a photo."
         );
         continue;
       }

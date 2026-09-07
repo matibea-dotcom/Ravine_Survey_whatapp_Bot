@@ -141,7 +141,7 @@ function summaryText(session) {
       const display = Array.isArray(v)
         ? v.join(", ")
         : typeof v === "object" && v !== null
-        ? v.address || `${v.lat}, ${v.lng}`
+        ? v.address || (v.mediaId ? `Photo received${v.caption ? ` ("${v.caption}")` : ""}` : `${v.lat}, ${v.lng}`)
         : String(v);
       return `• ${s.label}: ${display}`;
     });
@@ -238,6 +238,9 @@ function handleSkuLoop(session, message, upper, replies) {
 function processAnswer(step, message, answers) {
   if (step.type === "location") {
     return validators.validateLocation(message);
+  }
+  if (step.type === "photo") {
+    return validators.validatePhoto(message);
   }
   const raw = getRawText(message);
   switch (step.type) {

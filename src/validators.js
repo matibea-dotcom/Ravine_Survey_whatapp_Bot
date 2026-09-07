@@ -131,6 +131,28 @@ function validateLocation(message) {
   };
 }
 
+// Lightweight photo capture: records that a photo was sent, its WhatsApp
+// media ID (retrievable later via Meta's Graph API if you build the
+// download step), MIME type, and caption. Does not download/store the
+// actual image.
+function validatePhoto(message) {
+  if (message.type === "image" && message.image?.id) {
+    return {
+      ok: true,
+      value: {
+        mediaId: message.image.id,
+        mimeType: message.image.mime_type || null,
+        caption: message.image.caption || null,
+        receivedAt: new Date().toISOString(),
+      },
+    };
+  }
+  return {
+    ok: false,
+    error: "Please share a photo (use the WhatsApp \uD83D\uDCCE attachment > Camera/Gallery), or type SKIP.",
+  };
+}
+
 module.exports = {
   toTitleCase,
   isGenericTestValue,
@@ -141,4 +163,5 @@ module.exports = {
   validateSelect,
   validateMultiSelect,
   validateLocation,
+  validatePhoto,
 };

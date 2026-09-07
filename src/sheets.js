@@ -218,6 +218,7 @@ function flattenSubmission(submission, columns) {
   const a = submission.answers;
   const gps = a.gpsLocation || {};
   const skuPricing = a.productXSkuPricing || {};
+  const photo = a.shelfPhoto || {};
 
   return columns.map((col) => {
     switch (col) {
@@ -233,6 +234,10 @@ function flattenSubmission(submission, columns) {
       case "gpsLng": return gps.lng ?? "";
       case "gpsAddress": return gps.address ?? "";
       case "gpsSource": return gps.source ?? "";
+      case "shelfPhotoReceived": return photo.mediaId ? "Yes" : "No";
+      case "shelfPhotoMediaId": return photo.mediaId ?? "";
+      case "shelfPhotoMimeType": return photo.mimeType ?? "";
+      case "shelfPhotoCaption": return photo.caption ?? "";
       case "flags": return (submission.flags || []).join("; ");
       default: {
         // SKU pricing columns look like "<SKU name> WS" / "<SKU name> RRP".
