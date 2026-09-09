@@ -76,6 +76,28 @@ function findRecentDuplicate(waId, dupeKey) {
 }
 
 // --- Survey step navigation (track-aware) ---
+// Converts a Stores-tab record back into survey answer shape so selecting an
+// existing store pre-fills identity fields exactly as if freshly typed.
+function storeToAnswers(store) {
+  const lat = store.gpsLat !== "" ? parseFloat(store.gpsLat) : null;
+  const lng = store.gpsLng !== "" ? parseFloat(store.gpsLng) : null;
+  return {
+    accountName: store.storeName,
+    storeType: store.storeType,
+    contactName: store.contactName,
+    contactNumber: store.contactNumber || undefined,
+    areaLocation: store.areaLocation,
+    gpsLocation: {
+      lat: Number.isNaN(lat) ? null : lat,
+      lng: Number.isNaN(lng) ? null : lng,
+      address: store.gpsAddress || null,
+      source: store.gpsSource || "stored",
+      capturedAt: new Date().toISOString(),
+    },
+    storeId: store.storeId,
+  };
+}
+
 function surveyStepsFor(session) {
   return getSurveyStepsForTrack(session.track);
 }
@@ -630,6 +652,29 @@ async function handleInboundMessage(waId, message) {
     }
     session = sessionStore.newSession(waId);
     session.track = agent.surveyTrack || "GT";
+
+    // Phase 1: Stores registry — MT agents pick a known store instead of
+    // retyping identity fields every visit, or register a new one.
+    if (session.track === "MT") {
+      let stores = [];
+      try {
+        stores = await sheets.readAllStores("MT");
+      } catch (err) {
+        console.error("Failed to load stores list:", err.message);
+      }
+      if (stores.length > 0) {
+        session.storeFlow = "choosing";
+        session.storeChoices = stores;
+        replies.push(
+          `New ${trackLabel(session.track)} survey started (Ref: ${session.sessionId}).\n\n` +
+            "Which store are you visiting?\n" +
+            stores.map((s, i) => `${i + 1}. ${s.storeName} (${s.areaLocation})`).join("\n") +
+            "\n\nReply with a number, or type NEW to register a new store."
+        );
+        return replies;
+      }
+    }
+
     replies.push(`New ${trackLabel(session.track)} survey started (Ref: ${session.sessionId}). Type HELP any time for commands.\n\n${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
     return replies;
   }
@@ -642,6 +687,28 @@ async function handleInboundMessage(waId, message) {
   if (!session.track) session.track = agent.surveyTrack || "GT";
 
   sessionStore.touch(session);
+
+  // --- Store selection flow (Phase 1: Stores registry, MT only) ---
+  if (session.storeFlow === "choosing") {
+    if (upper === "NEW") {
+      session.storeFlow = null;
+      session.storeChoices = null;
+      replies.push(`${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
+      return replies;
+    }
+    const idx = Number(rawText.trim());
+    const stores = session.storeChoices || [];
+    if (!Number.isInteger(idx) || idx < 1 || idx > stores.length) {
+      replies.push(`Please reply with a number from 1 to ${stores.length}, or NEW to register a new store.`);
+      return replies;
+    }
+    const chosen = stores[idx - 1];
+    Object.assign(session.answers, storeToAnswers(chosen));
+    session.storeFlow = null;
+    session.storeChoices = null;
+    replies.push(`✅ Store selected: *${chosen.storeName}*.\n\n${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
+    return replies;
+  }
 
   // --- SKU pricing loop ---
   if (session.skuLoop) {
@@ -774,6 +841,34 @@ async function handleInboundMessage(waId, message) {
     replies.push(`Got it: *${display}*` + (flagNote ? ` (${flagNote})` : ""));
   } else if (flagNote) {
     replies.push(`Noted. (${flagNote})`);
+  }
+
+  // Persist a brand-new MT store to the registry right after its GPS is
+  // captured (the last identity field), so it's selectable on future visits.
+  if (step.key === "gpsLocation" && session.track === "MT" && !session.answers.storeId) {
+    const newStore = {
+      storeId: `STORE-${Date.now().toString(36).toUpperCase()}`,
+      storeName: session.answers.accountName || "",
+      storeType: session.answers.storeType || "",
+      areaLocation: session.answers.areaLocation || "",
+      gpsLat: result.value.lat ?? "",
+      gpsLng: result.value.lng ?? "",
+      gpsAddress: result.value.address ?? "",
+      gpsSource: result.value.source ?? "",
+      contactName: session.answers.contactName || "",
+      contactNumber: session.answers.contactNumber || "",
+      track: "MT",
+      createdAt: new Date().toISOString(),
+      createdByAgentWaId: waId,
+      createdByAgentName: agent.fullName,
+    };
+    try {
+      await sheets.appendStore(newStore);
+      session.answers.storeId = newStore.storeId;
+    } catch (err) {
+      console.error("Failed to save new store to registry:", err.message);
+      // Don't block the survey — the submission still proceeds without a storeId.
+    }
   }
 
   // SKU pricing loop trigger — works for any track whose survey defines a

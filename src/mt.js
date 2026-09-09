@@ -80,6 +80,7 @@ const SURVEY_STEPS = [
     required: true,
     prompt: "🏬 What is the *Store/Account Name*?",
     opts: { min: 2, max: 60 },
+    skipIf: (a) => !!a.storeId,
   },
   {
     key: "storeType",
@@ -88,6 +89,7 @@ const SURVEY_STEPS = [
     required: true,
     prompt: "What *type of store* is this?\n" + STORE_TYPE_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
     options: STORE_TYPE_OPTIONS,
+    skipIf: (a) => !!a.storeId,
   },
   {
     key: "contactName",
@@ -96,6 +98,7 @@ const SURVEY_STEPS = [
     required: true,
     prompt: "Who is the *contact person* at this account (buyer, store manager, or merchandising contact)?",
     opts: { min: 2, max: 50 },
+    skipIf: (a) => !!a.storeId,
   },
   {
     key: "contactNumber",
@@ -103,6 +106,7 @@ const SURVEY_STEPS = [
     type: "phone",
     required: false,
     prompt: "What is their *contact number*? (e.g. +254712345678, or SKIP)",
+    skipIf: (a) => !!a.storeId,
   },
   {
     key: "areaLocation",
@@ -111,6 +115,7 @@ const SURVEY_STEPS = [
     required: true,
     prompt: "What *area/location* is this store in?",
     opts: { min: 2, max: 60 },
+    skipIf: (a) => !!a.storeId,
   },
   {
     key: "gpsLocation",
@@ -118,6 +123,7 @@ const SURVEY_STEPS = [
     type: "location",
     required: true,
     prompt: "📍 Please share the store's *location pin*, or type the address if you can't share a pin.",
+    skipIf: (a) => !!a.storeId,
   },
   {
     key: "digitalPathStatus",
@@ -363,6 +369,7 @@ const COLUMNS = [
   "agentId",
   "agentRegion",
   "agentCompany",
+  "storeId",
   "accountName",
   "storeType",
   "contactName",

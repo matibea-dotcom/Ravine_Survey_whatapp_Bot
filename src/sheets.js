@@ -5,6 +5,14 @@ const { getColumnsForTrack, getSheetTabForTrack } = require("./surveys");
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID;
 const KEY_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "./service-account.json";
 const AGENTS_TAB = process.env.GOOGLE_SHEET_TAB_AGENTS || "Agents";
+const STORES_TAB = process.env.GOOGLE_SHEET_TAB_STORES || "Stores";
+
+const STORE_COLUMNS = [
+  "storeId", "storeName", "storeType", "areaLocation",
+  "gpsLat", "gpsLng", "gpsAddress", "gpsSource",
+  "contactName", "contactNumber", "track",
+  "createdAt", "createdByAgentWaId", "createdByAgentName",
+];
 
 // Base header for the Agents tab. "surveyTrack" is included here going
 // forward; if your Agents tab predates this and doesn't have that column yet,
@@ -208,6 +216,27 @@ async function deleteAgent(waId) {
   await deleteRow(AGENTS_TAB, rowIndex);
 }
 
+// ---- Stores tab (Phase 1: registry so agents pick a known store instead of
+// retyping it, and so future visits can look up the same store reliably) ----
+
+async function readAllStores(track) {
+  const { records } = await readAllRows(STORES_TAB);
+  return track ? records.filter((r) => r.track === track) : records;
+}
+
+async function appendStore(store) {
+  const header = await ensureHeaderHasColumns(STORES_TAB, STORE_COLUMNS);
+  const row = header.map((col) => store[col] ?? "");
+  const sheetsApi = await getClient();
+  await sheetsApi.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${STORES_TAB}!A1`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [row] },
+  });
+}
+
 // ---- Submissions tabs (one per track — GT/MT/Insurance) ----
 
 // Fields with a fixed home (outside `answers`) or that need special
@@ -277,4 +306,6 @@ module.exports = {
   updateAgentRow,
   deleteAgent,
   appendSubmission,
+  readAllStores,
+  appendStore,
 };
