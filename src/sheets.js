@@ -1,6 +1,7 @@
 const { google } = require("googleapis");
 const path = require("path");
 const { getColumnsForTrack, getSheetTabForTrack } = require("./surveys");
+const { RAVINE_SKU_LIST } = require("./surveys/mt");
 
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID;
 const KEY_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "./service-account.json";
@@ -247,7 +248,14 @@ function flattenSubmission(submission, columns) {
   const a = submission.answers;
   const gps = a.gpsLocation || {};
   const skuPricing = a.productXSkuPricing || {};
+  const ravinePricing = a.ravineSkuPricing || {};
+  const ravineDetails = a.ravineSkuDetails || {};
   const photo = a.shelfPhoto || {};
+  const WS_SUFFIX = " (WS/Carton)";
+  const RETAIL_SUFFIX = " (Retail/Piece)";
+  const FACINGS_SUFFIX = " Facings";
+  const STOCK_STATUS_NOTE_SUFFIX = " Stock Status Note";
+  const STOCK_STATUS_SUFFIX = " Stock Status";
 
   return columns.map((col) => {
     switch (col) {
@@ -269,6 +277,31 @@ function flattenSubmission(submission, columns) {
       case "shelfPhotoCaption": return photo.caption ?? "";
       case "flags": return (submission.flags || []).join("; ");
       default: {
+        if (col.endsWith(WS_SUFFIX)) {
+          const sku = col.slice(0, -WS_SUFFIX.length);
+          const entry = ravinePricing[sku];
+          if (entry) return entry.wsPerCarton ?? "";
+        }
+        if (col.endsWith(RETAIL_SUFFIX)) {
+          const sku = col.slice(0, -RETAIL_SUFFIX.length);
+          const entry = ravinePricing[sku];
+          if (entry) return entry.retailPerPiece ?? "";
+        }
+        if (col.endsWith(FACINGS_SUFFIX)) {
+          const sku = col.slice(0, -FACINGS_SUFFIX.length);
+          const d = ravineDetails[sku];
+          if (d) return d.facings ?? "";
+        }
+        if (col.endsWith(STOCK_STATUS_NOTE_SUFFIX)) {
+          const sku = col.slice(0, -STOCK_STATUS_NOTE_SUFFIX.length);
+          const d = ravineDetails[sku];
+          if (d) return d.stockStatusNote ?? "";
+        }
+        if (col.endsWith(STOCK_STATUS_SUFFIX)) {
+          const sku = col.slice(0, -STOCK_STATUS_SUFFIX.length);
+          const d = ravineDetails[sku];
+          if (d) return d.stockStatus ?? "";
+        }
         // SKU pricing columns look like "<SKU name> WS" / "<SKU name> RRP".
         if (col.endsWith(" WS") || col.endsWith(" RRP")) {
           const isWs = col.endsWith(" WS");
@@ -300,6 +333,65 @@ async function appendSubmission(submission) {
   });
 }
 
+// ---- MT decision-support report (Phase 2.5) ----
+// Computes the same headline KPIs as the manually-built Merch Dashboard
+// (valid visits, % Ravine stocked, % out-of-stock, avg visibility, avg
+// facings, % full planogram, % POS presence) directly from MT_Submissions,
+// so REPORT can return them live instead of needing a hand-built dashboard.
+async function computeMtReport() {
+  const tab = getSheetTabForTrack("MT");
+  const { records } = await readAllRows(tab);
+  const totalVisits = records.length;
+  if (totalVisits === 0) return { totalVisits: 0 };
+
+  const stockedYes = records.filter((r) => r.ravineStocked === "Yes").length;
+
+  let oosCount = 0;
+  let stockStatusTotal = 0;
+  let facingsSum = 0;
+  let facingsCount = 0;
+  for (const r of records) {
+    for (const entry of RAVINE_SKU_LIST) {
+      const status = r[`${entry.sku} Stock Status`];
+      if (status) {
+        stockStatusTotal += 1;
+        if (status === "Out of Stock") oosCount += 1;
+      }
+      const facingsVal = r[`${entry.sku} Facings`];
+      if (facingsVal !== undefined && facingsVal !== "") {
+        const n = Number(facingsVal);
+        if (!Number.isNaN(n)) {
+          facingsSum += n;
+          facingsCount += 1;
+        }
+      }
+    }
+  }
+
+  const visibilityValues = records
+    .map((r) => Number(r.shelfVisibilityRating))
+    .filter((n) => !Number.isNaN(n) && n > 0);
+
+  const planogramAnswered = records.filter((r) => r.planogramCompliance);
+  const planogramYes = planogramAnswered.filter((r) => r.planogramCompliance === "Yes").length;
+
+  const posAnswered = records.filter((r) => r.posMaterialsPresent);
+  const posPresent = posAnswered.filter((r) => r.posMaterialsPresent && r.posMaterialsPresent !== "None").length;
+
+  return {
+    totalVisits,
+    stockedYes,
+    stockedPct: totalVisits ? stockedYes / totalVisits : null,
+    oosPct: stockStatusTotal ? oosCount / stockStatusTotal : null,
+    avgVisibility: visibilityValues.length
+      ? visibilityValues.reduce((a, b) => a + b, 0) / visibilityValues.length
+      : null,
+    avgFacings: facingsCount ? facingsSum / facingsCount : null,
+    planogramPct: planogramAnswered.length ? planogramYes / planogramAnswered.length : null,
+    posPct: posAnswered.length ? posPresent / posAnswered.length : null,
+  };
+}
+
 module.exports = {
   readAllAgents,
   appendAgent,
@@ -308,4 +400,5 @@ module.exports = {
   appendSubmission,
   readAllStores,
   appendStore,
+  computeMtReport,
 };

@@ -12,12 +12,51 @@
 
 const PRODUCT_X_NAME = process.env.PRODUCT_X_NAME || "Ravine Dairy";
 
-const PRODUCT_X_SKUS = [
-  "250ml Full Cream UHT",
-  "500ml Full Cream UHT",
-  "1L Full Cream UHT",
-  "500ml Low Fat UHT",
-];
+// ---- Ravine product catalog (from the official price list appendix) ----
+// Grouped by category so agents pick a category first, then specific SKUs
+// within it, instead of scrolling one flat list of 19+ items.
+const RAVINE_CATEGORIES = ["Long Life Milk", "Yoghurt", "Lala", "Others"];
+
+const RAVINE_CATALOG = {
+  "Long Life Milk": [
+    { sku: "Fino 500ml", piecesPerCarton: 12, wsPerCarton: 660, wsPerPiece: 55, retailPerCarton: 720, retailPerPiece: 60 },
+    { sku: "ESL 500ml", piecesPerCarton: 12, wsPerCarton: 624, wsPerPiece: 52, retailPerCarton: 696, retailPerPiece: 58 },
+    { sku: "ESL 200ml", piecesPerCarton: 21, wsPerCarton: 525, wsPerPiece: 25, retailPerCarton: 588, retailPerPiece: 28 },
+  ],
+  Lala: [
+    { sku: "Lala Pouch 500ml", piecesPerCarton: 18, wsPerCarton: 990, wsPerPiece: 55, retailPerCarton: 1260, retailPerPiece: 70 },
+    { sku: "Lala Pouch 200ml", piecesPerCarton: 45, wsPerCarton: 900, wsPerPiece: 20, retailPerCarton: 1125, retailPerPiece: 25 },
+    { sku: "Lala Bottle 500ml", piecesPerCarton: 12, wsPerCarton: 780, wsPerPiece: 65, retailPerCarton: 840, retailPerPiece: 75 },
+  ],
+  Yoghurt: [
+    { sku: "Natural Yoghurt 500ml", piecesPerCarton: 6, wsPerCarton: 480, wsPerPiece: 80, retailPerCarton: 510, retailPerPiece: 85 },
+    { sku: "Natural Yoghurt 250ml", piecesPerCarton: 12, wsPerCarton: 336, wsPerPiece: 28, retailPerCarton: 372, retailPerPiece: 31 },
+    { sku: "Natural Yoghurt 150ml", piecesPerCarton: 12, wsPerCarton: 336, wsPerPiece: 28, retailPerCarton: 372, retailPerPiece: 31 },
+    { sku: "Natural Yoghurt 100ml", piecesPerCarton: 12, wsPerCarton: 240, wsPerPiece: 20, retailPerCarton: 264, retailPerPiece: 22 },
+    { sku: "Vanilla Yoghurt 500ml", piecesPerCarton: 6, wsPerCarton: 600, wsPerPiece: 100, retailPerCarton: 720, retailPerPiece: 120 },
+    { sku: "Vanilla Yoghurt 250ml", piecesPerCarton: 12, wsPerCarton: 600, wsPerPiece: 50, retailPerCarton: 780, retailPerPiece: 65 },
+    { sku: "Vanilla Yoghurt 150ml", piecesPerCarton: 12, wsPerCarton: 396, wsPerPiece: 33, retailPerCarton: 528, retailPerPiece: 44 },
+    { sku: "Vanilla Yoghurt 100ml", piecesPerCarton: 12, wsPerCarton: 288, wsPerPiece: 24, retailPerCarton: 384, retailPerPiece: 32 },
+    { sku: "Strawberry Yoghurt 500ml", piecesPerCarton: 6, wsPerCarton: 600, wsPerPiece: 100, retailPerCarton: 720, retailPerPiece: 120 },
+    { sku: "Strawberry Yoghurt 250ml", piecesPerCarton: 12, wsPerCarton: 600, wsPerPiece: 50, retailPerCarton: 780, retailPerPiece: 65 },
+    // NOTE: the source doc lists "Vanilla Yoghurt 150ml" twice and never lists
+    // Strawberry 150ml explicitly — almost certainly a copy-paste typo for
+    // "Strawberry Yoghurt 150ml". Using the Vanilla 150ml price as a
+    // placeholder (matches the pattern where Strawberry mirrors Vanilla at
+    // every other size) — please confirm/correct this one specifically.
+    { sku: "Strawberry Yoghurt 150ml", piecesPerCarton: 12, wsPerCarton: 396, wsPerPiece: 33, retailPerCarton: 528, retailPerPiece: 44 },
+    { sku: "Strawberry Yoghurt 100ml", piecesPerCarton: 12, wsPerCarton: 288, wsPerPiece: 24, retailPerCarton: 384, retailPerPiece: 32 },
+  ],
+  Others: [
+    { sku: "Crate 20 Litres", piecesPerCarton: 1, wsPerCarton: 1500, wsPerPiece: 1500, retailPerCarton: 1500, retailPerPiece: 1500 },
+    { sku: "Ghee 20kg", piecesPerCarton: 1, wsPerCarton: 13000, wsPerPiece: 650, retailPerCarton: 13000, retailPerPiece: 13000 },
+    { sku: "Cream (per kg)", piecesPerCarton: 1, wsPerCarton: 350, wsPerPiece: 350, retailPerCarton: 350, retailPerPiece: 350 },
+  ],
+};
+
+// Flat list + name->entry index, used for the pricing loop and Sheets columns.
+const RAVINE_SKU_LIST = Object.values(RAVINE_CATALOG).flat();
+const RAVINE_SKU_INDEX = Object.fromEntries(RAVINE_SKU_LIST.map((e) => [e.sku, e]));
 
 const STORE_TYPE_OPTIONS = ["Supermarket", "Mini-mart", "Kiosk/Duka", "Other"];
 const DIGITAL_PATH_STATUS_OPTIONS = ["Active / Working", "Disabled / Closed", "Not Used at This Account"];
@@ -160,15 +199,33 @@ const SURVEY_STEPS = [
     options: ["Yes", "No"],
   },
   {
+    key: "ravineCategoriesStocked",
+    label: "Ravine Categories Stocked",
+    type: "multiselect",
+    required: true,
+    prompt:
+      "Which *product categories* are stocked? Reply with numbers, comma/space separated:\n" +
+      RAVINE_CATEGORIES.map((c, i) => `${i + 1}. ${c}`).join("\n"),
+    options: RAVINE_CATEGORIES,
+    skipIf: (a) => a.ravineStocked !== "Yes",
+  },
+  {
     key: "skusStocked",
     label: "SKUs Stocked",
-    type: "multiselect",
-    required: false,
-    prompt:
-      `Which *${PRODUCT_X_NAME} SKUs* are stocked? Reply with numbers, comma/space separated:\n` +
-      PRODUCT_X_SKUS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
-    options: PRODUCT_X_SKUS,
-    skipIf: (a) => a.ravineStocked !== "Yes",
+    type: "multiselect_dynamic",
+    required: true,
+    promptBuilder: (a) => {
+      const cats = a.ravineCategoriesStocked || [];
+      const options = cats.flatMap((c) => (RAVINE_CATALOG[c] || []).map((e) => e.sku));
+      return {
+        options,
+        prompt:
+          "Which *specific SKUs* are stocked? Reply with numbers, comma/space separated:\n" +
+          options.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+      };
+    },
+    skipIf: (a) => !a.ravineCategoriesStocked || a.ravineCategoriesStocked.length === 0,
+    // engine.js's Ravine pricing loop triggers automatically off this exact key.
   },
   {
     key: "shelfPosition",
@@ -179,32 +236,11 @@ const SURVEY_STEPS = [
     options: SHELF_POSITION_OPTIONS,
     skipIf: (a) => a.ravineStocked !== "Yes",
   },
-  {
-    key: "numberOfFacings",
-    label: "Number of Facings",
-    type: "numeric",
-    required: false,
-    prompt: "How many *shelf facings* does the brand have here? (numbers only, or SKIP)",
-    opts: { allowZero: true },
-    skipIf: (a) => a.ravineStocked !== "Yes",
-  },
-  {
-    key: "stockStatus",
-    label: "Stock Status",
-    type: "select",
-    required: true,
-    prompt: "What is the *stock status*?\n" + STOCK_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
-    options: STOCK_STATUS_OPTIONS,
-    skipIf: (a) => a.ravineStocked !== "Yes",
-  },
-  {
-    key: "stockStatusOtherNote",
-    label: "Stock Status (Other) Detail",
-    type: "comments",
-    required: false,
-    prompt: "You selected 'Other' for stock status — please describe it, or SKIP.",
-    skipIf: (a) => a.stockStatus !== "Other",
-  },
+  // NOTE: facings + stock status used to be asked once overall here. Real
+  // field data showed agents trying to report these per-SKU anyway (e.g.
+  // "ESL 500ml 5 facings, ESL 200ml 2 facings..." typed into a single free
+  // text box). Now captured per-SKU inside the Ravine pricing loop in
+  // engine.js instead (see ravinePriceLoop's "facings"/"stockStatus" stages).
   {
     key: "priceVsCompetitor",
     label: "Price vs Nearest Competitor",
@@ -383,11 +419,11 @@ const COLUMNS = [
   "digitalPathIssueNote",
   "pendingOrders",
   "ravineStocked",
+  "ravineCategoriesStocked",
   "skusStocked",
+  ...RAVINE_SKU_LIST.flatMap((e) => [`${e.sku} (WS/Carton)`, `${e.sku} (Retail/Piece)`]),
   "shelfPosition",
-  "numberOfFacings",
-  "stockStatus",
-  "stockStatusOtherNote",
+  ...RAVINE_SKU_LIST.flatMap((e) => [`${e.sku} Facings`, `${e.sku} Stock Status`, `${e.sku} Stock Status Note`]),
   "priceVsCompetitor",
   "priceDifferenceAmount",
   "shelfVisibilityRating",
@@ -420,7 +456,10 @@ module.exports = {
   SURVEY_STEPS,
   COLUMNS,
   PRODUCT_X_NAME,
-  PRODUCT_X_SKUS,
+  RAVINE_CATEGORIES,
+  RAVINE_CATALOG,
+  RAVINE_SKU_LIST,
+  RAVINE_SKU_INDEX,
   STORE_TYPE_OPTIONS,
   DIGITAL_PATH_STATUS_OPTIONS,
   SHELF_POSITION_OPTIONS,

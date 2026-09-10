@@ -11,6 +11,10 @@ const {
   trackKeyFromArg,
   getSurveyStepsForTrack,
 } = require("./surveys");
+// Ravine catalog lookup is MT-specific by design (this pricing-loop feature
+// only exists for the MT track's SURVEY_STEPS) — imported directly rather
+// than through the generic track registry.
+const { RAVINE_SKU_INDEX, STOCK_STATUS_OPTIONS: RAVINE_STOCK_STATUS_OPTIONS } = require("./surveys/mt");
 
 const MAX_RETRIES = 3;
 const MAX_BACK = 5;
@@ -124,7 +128,27 @@ function progressLine(session) {
   return `Step ${session.stepIndex + 1} of ${steps.length}`;
 }
 
-function advance(session) {
+function advance(session, answeredKey) {
+  if (answeredKey) {
+    // Use the RAW (unfiltered) step order and count how many steps up to and
+    // including the answered one are currently active (using answers AFTER
+    // this turn's update). That count is exactly the right stepIndex for
+    // "whatever comes next" in the current active list — correct even if
+    // answering this step caused it (or others) to newly skip themselves,
+    // which a simple "find this key in the filtered list" approach cannot
+    // handle (the key may no longer be in that list at all).
+    const allSteps = surveyStepsFor(session);
+    const rawIdx = allSteps.findIndex((s) => s.key === answeredKey);
+    if (rawIdx !== -1) {
+      const activeCount = allSteps
+        .slice(0, rawIdx + 1)
+        .filter((s) => !(s.skipIf && s.skipIf(session.answers))).length;
+      session.stepIndex = activeCount;
+      return;
+    }
+  }
+  // Fallback for call sites that don't have a step key handy — correct only
+  // when no skip-state changed as a result of the answer.
   session.stepIndex += 1;
 }
 
@@ -175,6 +199,24 @@ function summaryText(session) {
     );
   }
 
+  const ravinePricing = session.answers.ravineSkuPricing;
+  if (ravinePricing && Object.keys(ravinePricing).length > 0) {
+    lines.push(
+      ...Object.entries(ravinePricing).map(
+        ([sku, p]) => `• ${sku}: WS ${p.wsPerCarton ?? "-"}/carton, Retail ${p.retailPerPiece ?? "-"}/piece${p.source === "manual" ? " (manual)" : ""}`
+      )
+    );
+  }
+
+  const ravineDetails = session.answers.ravineSkuDetails;
+  if (ravineDetails && Object.keys(ravineDetails).length > 0) {
+    lines.push(
+      ...Object.entries(ravineDetails).map(
+        ([sku, d]) => `• ${sku}: ${d.facings ?? "-"} facings, ${d.stockStatus ?? "-"}${d.stockStatusNote ? ` (${d.stockStatusNote})` : ""}`
+      )
+    );
+  }
+
   return lines.length ? lines.join("\n") : "No answers captured yet.";
 }
 
@@ -196,7 +238,7 @@ function promptForSkuLoopOrContinue(session) {
   const loop = session.skuLoop;
   if (loop.index >= loop.skus.length) {
     session.skuLoop = null;
-    advance(session);
+    advance(session, loop.stepKey);
     return promptForCurrentOrSummary(session);
   }
   const sku = loop.skus[loop.index];
@@ -254,6 +296,141 @@ function handleSkuLoop(session, message, upper, replies) {
   advanceSkuLoop(loop);
   replies.push(...promptForSkuLoopOrContinue(session));
   return replies;
+}
+
+// --- Ravine catalog pricing loop: shows the catalog's recommended wholesale
+// (per carton) and retail (per piece) price for each selected SKU; agent
+// either confirms it as-is or types an override in one message, instead of
+// two separate blank ws/rrp prompts like the generic SKU loop above. ---
+function ravineCatalogLookup(sku) {
+  return RAVINE_SKU_INDEX[sku] || null;
+}
+
+function promptForRavinePriceLoopOrContinue(session) {
+  const loop = session.ravinePriceLoop;
+  if (loop.index >= loop.skus.length) {
+    session.ravinePriceLoop = null;
+    advance(session, loop.stepKey);
+    return promptForCurrentOrSummary(session);
+  }
+  const sku = loop.skus[loop.index];
+  const entry = ravineCatalogLookup(sku);
+
+  if (loop.stage === "price") {
+    if (!entry) {
+      // Shouldn't happen (sku came from the catalog-driven options list), but
+      // fail safe rather than crash the survey — skip straight to facings.
+      session.answers.ravineSkuPricing = session.answers.ravineSkuPricing || {};
+      session.answers.ravineSkuPricing[sku] = { wsPerCarton: null, retailPerPiece: null, source: "unavailable" };
+      loop.stage = "facings";
+      return promptForRavinePriceLoopOrContinue(session);
+    }
+    return [
+      `*${sku}* — recommended: WS KES ${entry.wsPerCarton}/carton, Retail KES ${entry.retailPerPiece}/piece.\n` +
+        "Reply CONFIRM to accept these prices, or type new values as *wholesale,retail* (e.g. 600,65) to override.",
+    ];
+  }
+  if (loop.stage === "facings") {
+    return [`How many *shelf facings* does *${sku}* have? (numbers only)`];
+  }
+  if (loop.stage === "stockStatus") {
+    return [
+      `What is the *stock status* of *${sku}*?\n` +
+        RAVINE_STOCK_STATUS_OPTIONS.map((s, i) => `${i + 1}. ${s}`).join("\n"),
+    ];
+  }
+  if (loop.stage === "stockStatusNote") {
+    return [`You selected 'Other' for *${sku}*'s stock status — please describe it.`];
+  }
+  return [""]; // unreachable
+}
+
+function handleRavinePriceLoop(session, message, upper, replies) {
+  const loop = session.ravinePriceLoop;
+  const sku = loop.skus[loop.index];
+  const entry = ravineCatalogLookup(sku);
+
+  if (["SUBMIT", "EDIT", "BACK"].includes(upper)) {
+    replies.push(`Please finish *${sku}*'s details first, then ${upper} again.`);
+    return replies;
+  }
+
+  session.answers.ravineSkuPricing = session.answers.ravineSkuPricing || {};
+  session.answers.ravineSkuDetails = session.answers.ravineSkuDetails || {};
+  session.answers.ravineSkuDetails[sku] = session.answers.ravineSkuDetails[sku] || {};
+
+  if (loop.stage === "price") {
+    if (upper === "CONFIRM") {
+      session.answers.ravineSkuPricing[sku] = {
+        wsPerCarton: entry?.wsPerCarton ?? null,
+        retailPerPiece: entry?.retailPerPiece ?? null,
+        source: "catalog",
+      };
+    } else {
+      const parts = getRawText(message).split(",").map((p) => p.trim());
+      if (parts.length !== 2) {
+        replies.push('Please reply CONFIRM, or type two numbers as "wholesale,retail" (e.g. 600,65).');
+        return replies;
+      }
+      const ws = validators.validateNumeric(parts[0], { allowZero: false });
+      const retail = validators.validateNumeric(parts[1], { allowZero: false });
+      if (!ws.ok || !retail.ok) {
+        replies.push('Please reply CONFIRM, or type two numbers as "wholesale,retail" (e.g. 600,65).');
+        return replies;
+      }
+      session.answers.ravineSkuPricing[sku] = { wsPerCarton: ws.value, retailPerPiece: retail.value, source: "manual" };
+      session.flags = session.flags || [];
+      session.flags.push(`${sku}: manual price override entered (catalog: WS ${entry?.wsPerCarton}, Retail ${entry?.retailPerPiece}).`);
+    }
+    loop.stage = "facings";
+    replies.push(...promptForRavinePriceLoopOrContinue(session));
+    return replies;
+  }
+
+  if (loop.stage === "facings") {
+    const result = validators.validateNumeric(getRawText(message), { allowZero: true });
+    if (!result.ok) {
+      replies.push(result.error);
+      return replies;
+    }
+    session.answers.ravineSkuDetails[sku].facings = result.value;
+    loop.stage = "stockStatus";
+    replies.push(...promptForRavinePriceLoopOrContinue(session));
+    return replies;
+  }
+
+  if (loop.stage === "stockStatus") {
+    const result = validators.validateSelect(getRawText(message), RAVINE_STOCK_STATUS_OPTIONS);
+    if (!result.ok) {
+      replies.push(result.error);
+      return replies;
+    }
+    session.answers.ravineSkuDetails[sku].stockStatus = result.value;
+    if (result.value === "Other") {
+      loop.stage = "stockStatusNote";
+      replies.push(...promptForRavinePriceLoopOrContinue(session));
+      return replies;
+    }
+    loop.index += 1;
+    loop.stage = "price";
+    replies.push(...promptForRavinePriceLoopOrContinue(session));
+    return replies;
+  }
+
+  if (loop.stage === "stockStatusNote") {
+    const result = validators.validateComments(getRawText(message));
+    if (!result.ok) {
+      replies.push(result.error);
+      return replies;
+    }
+    session.answers.ravineSkuDetails[sku].stockStatusNote = result.value;
+    loop.index += 1;
+    loop.stage = "price";
+    replies.push(...promptForRavinePriceLoopOrContinue(session));
+    return replies;
+  }
+
+  return replies; // unreachable
 }
 
 // --- Answer validation ---
@@ -345,9 +522,43 @@ function handleGlobalCommand(waId, agent, session, cmd, replies) {
 // --- Admin command handler ---
 async function handleAdminCommand(cmd, replies) {
   switch (cmd) {
-    case "REPORT":
-      replies.push("A summary report request has been logged. Your supervisor will receive it shortly.");
+    case "REPORT": {
+      try {
+        const stats = await sheets.computeMtReport();
+        if (!stats.totalVisits) {
+          replies.push("No MT submissions yet to report on.");
+          return replies;
+        }
+        const pct = (n) => (n == null ? "n/a" : `${Math.round(n * 100)}%`);
+        const num = (n, d = 1) => (n == null ? "n/a" : n.toFixed(d));
+
+        const gaps = [
+          { label: "availability", gap: stats.stockedPct != null ? 1 - stats.stockedPct : 0, msg: `${pct(stats.stockedPct != null ? 1 - stats.stockedPct : null)} of visited outlets did not stock Ravine` },
+          { label: "planogram compliance", gap: stats.planogramPct != null ? 1 - stats.planogramPct : 0, msg: `planogram compliance is only ${pct(stats.planogramPct)}` },
+          { label: "POS visibility", gap: stats.posPct != null ? 1 - stats.posPct : 0, msg: `POS material presence is only ${pct(stats.posPct)}` },
+        ].sort((a, b) => b.gap - a.gap);
+        const priority =
+          gaps[0].gap < 0.05
+            ? "Priority: no major gaps — availability, planogram, and POS visibility all look strong across visited outlets."
+            : `Priority: address ${gaps[0].label} first — ${gaps[0].msg}.`;
+
+        replies.push(
+          "📊 *MT Field Report*\n" +
+            `Visits: ${stats.totalVisits}\n` +
+            `Ravine Stocked: ${pct(stats.stockedPct)} (${stats.stockedYes}/${stats.totalVisits})\n` +
+            `Out of Stock (per SKU): ${pct(stats.oosPct)}\n` +
+            `Avg Shelf Visibility: ${num(stats.avgVisibility)}/5\n` +
+            `Avg Facings: ${num(stats.avgFacings)}\n` +
+            `Full Planogram: ${pct(stats.planogramPct)}\n` +
+            `POS Materials Present: ${pct(stats.posPct)}\n\n` +
+            priority
+        );
+      } catch (err) {
+        console.error("REPORT failed:", err.message);
+        replies.push("⚠️ Couldn't generate the report right now. Try again shortly.");
+      }
       return replies;
+    }
     case "MYDATA":
       replies.push("Your submission history will be sent shortly.");
       return replies;
@@ -596,6 +807,13 @@ async function handleInboundMessage(waId, message) {
     return replies;
   }
 
+  // --- Admin commands (checked before registration gate — an admin
+  // shouldn't need to be a registered survey agent to pull a report) ---
+  if (ADMIN_COMMANDS.includes(upper)) {
+    if (!requireAdmin(waId, replies)) return replies;
+    return handleAdminCommand(upper, replies);
+  }
+
   // --- Registration flow for first-time users (SOW 1.4) ---
   if (!agent) {
     return handleRegistration(waId, message, replies);
@@ -636,12 +854,6 @@ async function handleInboundMessage(waId, message) {
   if (GLOBAL_COMMANDS.includes(upper)) {
     handleGlobalCommand(waId, agent, session, upper, replies);
     return replies;
-  }
-
-  // --- Admin commands ---
-  if (ADMIN_COMMANDS.includes(upper)) {
-    if (!requireAdmin(waId, replies)) return replies;
-    return handleAdminCommand(upper, replies);
   }
 
   // --- START a new survey ---
@@ -714,6 +926,9 @@ async function handleInboundMessage(waId, message) {
   if (session.skuLoop) {
     return handleSkuLoop(session, message, upper, replies);
   }
+  if (session.ravinePriceLoop) {
+    return handleRavinePriceLoop(session, message, upper, replies);
+  }
 
   // --- SUBMIT flow ---
   if (upper === "SUBMIT") {
@@ -777,7 +992,7 @@ async function handleInboundMessage(waId, message) {
       return replies;
     }
     session.answers[step.key] = null;
-    advance(session);
+    advance(session, step.key);
     replies.push(...promptForCurrentOrSummary(session));
     return replies;
   }
@@ -874,12 +1089,19 @@ async function handleInboundMessage(waId, message) {
   // SKU pricing loop trigger — works for any track whose survey defines a
   // multiselect step with this exact key (see gt.js's productXSkusAvailable).
   if (step.key === "productXSkusAvailable" && Array.isArray(result.value) && result.value.length > 0) {
-    session.skuLoop = { skus: result.value, index: 0, field: "ws" };
+    session.skuLoop = { skus: result.value, index: 0, field: "ws", stepKey: step.key };
     replies.push(...promptForSkuLoopOrContinue(session));
     return replies;
   }
 
-  advance(session);
+  // Ravine catalog pricing loop trigger (MT's category-driven SKU selection).
+  if (step.key === "skusStocked" && Array.isArray(result.value) && result.value.length > 0) {
+    session.ravinePriceLoop = { skus: result.value, index: 0, stage: "price", stepKey: step.key };
+    replies.push(...promptForRavinePriceLoopOrContinue(session));
+    return replies;
+  }
+
+  advance(session, step.key);
   replies.push(...promptForCurrentOrSummary(session));
   return replies;
 }
