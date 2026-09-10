@@ -14,7 +14,7 @@ const {
 // Ravine catalog lookup is MT-specific by design (this pricing-loop feature
 // only exists for the MT track's SURVEY_STEPS) — imported directly rather
 // than through the generic track registry.
-const { RAVINE_SKU_INDEX, STOCK_STATUS_OPTIONS: RAVINE_STOCK_STATUS_OPTIONS } = require("./surveys/mt");
+const { RAVINE_SKU_INDEX, RAVINE_CATEGORIES, STOCK_STATUS_OPTIONS: RAVINE_STOCK_STATUS_OPTIONS } = require("./surveys/mt");
 
 const MAX_RETRIES = 3;
 const MAX_BACK = 5;
@@ -213,6 +213,16 @@ function summaryText(session) {
     lines.push(
       ...Object.entries(ravineDetails).map(
         ([sku, d]) => `• ${sku}: ${d.facings ?? "-"} facings, ${d.stockStatus ?? "-"}${d.stockStatusNote ? ` (${d.stockStatusNote})` : ""}`
+      )
+    );
+  }
+
+  const competitorPricing = session.answers.competitorPricing;
+  if (competitorPricing && Object.keys(competitorPricing).length > 0) {
+    const cats = session.answers.competitorCategories || {};
+    lines.push(
+      ...Object.entries(competitorPricing).map(
+        ([brand, p]) => `• ${brand}: Reg ${p.regular ?? "-"}, Promo ${p.promo ?? "-"} [${(cats[brand] || []).join(", ")}]`
       )
     );
   }
@@ -427,6 +437,98 @@ function handleRavinePriceLoop(session, message, upper, replies) {
     loop.index += 1;
     loop.stage = "price";
     replies.push(...promptForRavinePriceLoopOrContinue(session));
+    return replies;
+  }
+
+  return replies; // unreachable
+}
+
+// --- Competitor brand loop (Phase 3): for each ranked brand, a quick
+// category-presence checklist, then one regular price and one promo price.
+// (Category x brand pricing would add 25+ more questions — see mt.js.) ---
+function expandOtherBrands(rankedBrands, otherNames) {
+  const idx = rankedBrands.indexOf("Other");
+  if (idx === -1) return rankedBrands;
+  return [...rankedBrands.slice(0, idx), ...otherNames, ...rankedBrands.slice(idx + 1)];
+}
+
+function startCompetitorLoop(session, brands, stepKey) {
+  session.competitorLoop = { brands, brandIndex: 0, stage: "categories", stepKey };
+}
+
+function promptForCompetitorLoopOrContinue(session) {
+  const loop = session.competitorLoop;
+  if (loop.brandIndex >= loop.brands.length) {
+    session.competitorLoop = null;
+    advance(session, loop.stepKey);
+    return promptForCurrentOrSummary(session);
+  }
+  const brand = loop.brands[loop.brandIndex];
+  if (loop.stage === "categories") {
+    return [
+      `Which *categories* does *${brand}* have products in? Reply with numbers, comma/space separated:\n` +
+        RAVINE_CATEGORIES.map((c, i) => `${i + 1}. ${c}`).join("\n"),
+    ];
+  }
+  if (loop.stage === "regularPrice") {
+    return [`What is *${brand}*'s typical *regular price* (KES)? (numbers only)`];
+  }
+  if (loop.stage === "promoPrice") {
+    return [`Does *${brand}* have a *promotional price* right now? Reply with the amount (KES), or SKIP if none.`];
+  }
+  return [""]; // unreachable
+}
+
+function handleCompetitorLoop(session, message, upper, replies) {
+  const loop = session.competitorLoop;
+  const brand = loop.brands[loop.brandIndex];
+
+  if (["SUBMIT", "EDIT", "BACK"].includes(upper)) {
+    replies.push(`Please finish *${brand}*'s details first, then ${upper} again.`);
+    return replies;
+  }
+
+  session.answers.competitorCategories = session.answers.competitorCategories || {};
+  session.answers.competitorPricing = session.answers.competitorPricing || {};
+
+  if (loop.stage === "categories") {
+    const result = validators.validateMultiSelect(getRawText(message), RAVINE_CATEGORIES, { allowNone: false });
+    if (!result.ok) {
+      replies.push(result.error);
+      return replies;
+    }
+    session.answers.competitorCategories[brand] = result.value;
+    loop.stage = "regularPrice";
+    replies.push(...promptForCompetitorLoopOrContinue(session));
+    return replies;
+  }
+
+  if (loop.stage === "regularPrice") {
+    const result = validators.validateNumeric(getRawText(message), { allowZero: false });
+    if (!result.ok) {
+      replies.push(result.error);
+      return replies;
+    }
+    session.answers.competitorPricing[brand] = { regular: result.value, promo: null };
+    loop.stage = "promoPrice";
+    replies.push(...promptForCompetitorLoopOrContinue(session));
+    return replies;
+  }
+
+  if (loop.stage === "promoPrice") {
+    if (upper === "SKIP") {
+      // promo already defaults to null above
+    } else {
+      const result = validators.validateNumeric(getRawText(message), { allowZero: false });
+      if (!result.ok) {
+        replies.push(`${result.error} Or type SKIP if there's no promo price.`);
+        return replies;
+      }
+      session.answers.competitorPricing[brand].promo = result.value;
+    }
+    loop.brandIndex += 1;
+    loop.stage = "categories";
+    replies.push(...promptForCompetitorLoopOrContinue(session));
     return replies;
   }
 
@@ -929,6 +1031,9 @@ async function handleInboundMessage(waId, message) {
   if (session.ravinePriceLoop) {
     return handleRavinePriceLoop(session, message, upper, replies);
   }
+  if (session.competitorLoop) {
+    return handleCompetitorLoop(session, message, upper, replies);
+  }
 
   // --- SUBMIT flow ---
   if (upper === "SUBMIT") {
@@ -1098,6 +1203,28 @@ async function handleInboundMessage(waId, message) {
   if (step.key === "skusStocked" && Array.isArray(result.value) && result.value.length > 0) {
     session.ravinePriceLoop = { skus: result.value, index: 0, stage: "price", stepKey: step.key };
     replies.push(...promptForRavinePriceLoopOrContinue(session));
+    return replies;
+  }
+
+  // Competitor brand loop trigger. Two paths: no "Other" picked -> start
+  // right after competitorBrandsRanked; "Other" picked -> start after its
+  // name(s) are typed in competitorOtherBrandNames.
+  if (
+    step.key === "competitorBrandsRanked" &&
+    Array.isArray(result.value) &&
+    result.value.length > 0 &&
+    !result.value.includes("Other")
+  ) {
+    startCompetitorLoop(session, result.value, step.key);
+    replies.push(...promptForCompetitorLoopOrContinue(session));
+    return replies;
+  }
+  if (step.key === "competitorOtherBrandNames") {
+    const rankedBrands = session.answers.competitorBrandsRanked || [];
+    const otherNames = String(result.value).split(",").map((s) => s.trim()).filter(Boolean);
+    const expanded = expandOtherBrands(rankedBrands, otherNames);
+    startCompetitorLoop(session, expanded, step.key);
+    replies.push(...promptForCompetitorLoopOrContinue(session));
     return replies;
   }
 

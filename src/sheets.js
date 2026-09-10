@@ -1,7 +1,7 @@
 const { google } = require("googleapis");
 const path = require("path");
 const { getColumnsForTrack, getSheetTabForTrack } = require("./surveys");
-const { RAVINE_SKU_LIST } = require("./surveys/mt");
+const { RAVINE_SKU_LIST, COMPETITOR_BRANDS } = require("./surveys/mt");
 
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID;
 const KEY_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "./service-account.json";
@@ -250,12 +250,17 @@ function flattenSubmission(submission, columns) {
   const skuPricing = a.productXSkuPricing || {};
   const ravinePricing = a.ravineSkuPricing || {};
   const ravineDetails = a.ravineSkuDetails || {};
+  const competitorCategories = a.competitorCategories || {};
+  const competitorPricing = a.competitorPricing || {};
   const photo = a.shelfPhoto || {};
   const WS_SUFFIX = " (WS/Carton)";
   const RETAIL_SUFFIX = " (Retail/Piece)";
   const FACINGS_SUFFIX = " Facings";
   const STOCK_STATUS_NOTE_SUFFIX = " Stock Status Note";
   const STOCK_STATUS_SUFFIX = " Stock Status";
+  const CAT_SUFFIX = " Categories";
+  const REG_PRICE_SUFFIX = " Regular Price";
+  const PROMO_PRICE_SUFFIX = " Promo Price";
 
   return columns.map((col) => {
     switch (col) {
@@ -275,8 +280,34 @@ function flattenSubmission(submission, columns) {
       case "shelfPhotoMediaId": return photo.mediaId ?? "";
       case "shelfPhotoMimeType": return photo.mimeType ?? "";
       case "shelfPhotoCaption": return photo.caption ?? "";
+      case "Other Competitor Brands & Pricing": {
+        // Catch-all for any ranked brand not in the fixed 7 (e.g. a typed
+        // "Other" brand name) — the fixed 7 each get their own 3 columns
+        // via the suffix handling below instead.
+        const extras = Object.keys(competitorPricing).filter((b) => !COMPETITOR_BRANDS.includes(b));
+        if (extras.length === 0) return "";
+        return extras
+          .map((b) => {
+            const p = competitorPricing[b] || {};
+            const cats = (competitorCategories[b] || []).join("/");
+            return `${b} [${cats}]: Reg ${p.regular ?? "-"}, Promo ${p.promo ?? "-"}`;
+          })
+          .join("; ");
+      }
       case "flags": return (submission.flags || []).join("; ");
       default: {
+        if (col.endsWith(CAT_SUFFIX)) {
+          const brand = col.slice(0, -CAT_SUFFIX.length);
+          if (COMPETITOR_BRANDS.includes(brand)) return (competitorCategories[brand] || []).join(", ");
+        }
+        if (col.endsWith(REG_PRICE_SUFFIX)) {
+          const brand = col.slice(0, -REG_PRICE_SUFFIX.length);
+          if (COMPETITOR_BRANDS.includes(brand)) return competitorPricing[brand]?.regular ?? "";
+        }
+        if (col.endsWith(PROMO_PRICE_SUFFIX)) {
+          const brand = col.slice(0, -PROMO_PRICE_SUFFIX.length);
+          if (COMPETITOR_BRANDS.includes(brand)) return competitorPricing[brand]?.promo ?? "";
+        }
         if (col.endsWith(WS_SUFFIX)) {
           const sku = col.slice(0, -WS_SUFFIX.length);
           const entry = ravinePricing[sku];

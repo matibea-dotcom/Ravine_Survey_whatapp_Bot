@@ -75,41 +75,37 @@ const PAYMENT_STATUS_OPTIONS = [
   "Overdue (14+ days)",
 ];
 
-// Competitor & category pricing — one prompt per category, matching the
-// original form's "Brand – Regular Price – Promo Price, one per line"
-// instruction. Vanilla 250ml is intentionally optional (matches the form).
-const PRICING_CATEGORIES = [
-  { key: "pricingEsl500ml", label: "ESL 500ml", required: true },
-  { key: "pricingEsl200ml", label: "ESL 200ml", required: true },
-  { key: "pricingFino500ml", label: "Fino 500ml", required: true },
-  { key: "pricingLalaPouch500ml", label: "Lala Pouch 500ml", required: true },
-  { key: "pricingLalaPouch200ml", label: "Lala Pouch 200ml", required: true },
-  { key: "pricingLalaBottle", label: "Lala Bottle", required: true },
-  { key: "pricingStrawberry500ml", label: "Strawberry 500ml", required: true },
-  { key: "pricingStrawberry250ml", label: "Strawberry 250ml", required: true },
-  { key: "pricingStrawberry150ml", label: "Strawberry 150ml", required: true },
-  { key: "pricingStrawberry100ml", label: "Strawberry 100ml", required: true },
-  { key: "pricingVanilla500ml", label: "Vanilla 500ml", required: true },
-  { key: "pricingVanilla250ml", label: "Vanilla 250ml", required: false },
-  { key: "pricingVanilla150ml", label: "Vanilla 150ml", required: true },
-  { key: "pricingVanilla100ml", label: "Vanilla 100ml", required: true },
-  { key: "pricingGhee", label: "Ghee", required: true },
-  { key: "pricingCheese", label: "Cheese", required: true },
-];
+// Competitor pricing (Phase 3) — agent ranks the competitor brands actually
+// present by sales volume, then each ranked brand gets a category-presence
+// checklist + one regular price + one promo price (see engine.js's
+// competitorLoop). This trades category×brand pricing granularity for a
+// much shorter, cleaner survey — full per-category competitor pricing would
+// add 25+ more questions on top of an already-long flow.
+const COMPETITOR_BRANDS = ["Brookside", "Fresha", "KCC", "Tuzo", "Ilara", "Delamere", "Daima"];
+const COMPETITOR_BRAND_OPTIONS = [...COMPETITOR_BRANDS, "Other"];
 
-const pricingSteps = PRICING_CATEGORIES.map((cat, i) => ({
-  key: cat.key,
-  label: `${cat.label} – Brands & Prices`,
-  type: "comments",
-  required: cat.required,
-  prompt:
-    (i === 0
-      ? "Now let's capture competitor pricing by category.\n\n" +
-        "For each category, list every brand you see on the shelf using the format:\n" +
-        "*Brand – Regular Price – Promotional Price (if any)*\n" +
-        "One brand per line.\n\n"
-      : "") + `*${cat.label} – Brands & Prices*${cat.required ? "" : " (optional, or SKIP)"}`,
-}));
+const competitorSteps = [
+  {
+    key: "competitorBrandsRanked",
+    label: "Competitor Brands (Ranked)",
+    type: "multiselect",
+    required: false,
+    prompt:
+      "Which *competitor brands* are present here? Reply with numbers *in order of sales volume* (most sold first), comma separated — up to 7, or SKIP if none:\n" +
+      COMPETITOR_BRAND_OPTIONS.map((b, i) => `${i + 1}. ${b}`).join("\n"),
+    options: COMPETITOR_BRAND_OPTIONS,
+  },
+  {
+    key: "competitorOtherBrandNames",
+    label: "Other Competitor Brand Names",
+    type: "comments",
+    required: true,
+    prompt: "You selected 'Other' — name the additional brand(s), comma separated.",
+    skipIf: (a) => !a.competitorBrandsRanked || !a.competitorBrandsRanked.includes("Other"),
+    // engine.js's competitor loop triggers automatically off this step
+    // finishing (or off competitorBrandsRanked directly if "Other" wasn't picked).
+  },
+];
 
 const SURVEY_STEPS = [
   {
@@ -277,7 +273,7 @@ const SURVEY_STEPS = [
     opts: { min: 1, max: 100, titleCase: false },
     skipIf: (a) => a.ravineStocked !== "Yes",
   },
-  ...pricingSteps,
+  ...competitorSteps,
   {
     key: "otherDairyCategoriesNote",
     label: "Other Dairy Categories Present",
@@ -428,7 +424,9 @@ const COLUMNS = [
   "priceDifferenceAmount",
   "shelfVisibilityRating",
   "brandsNextToRavine",
-  ...PRICING_CATEGORIES.map((c) => c.key),
+  "competitorBrandsRanked",
+  ...COMPETITOR_BRANDS.flatMap((b) => [`${b} Categories`, `${b} Regular Price`, `${b} Promo Price`]),
+  "Other Competitor Brands & Pricing", // catch-all for any brand not in the fixed 7
   "otherDairyCategoriesNote",
   "posMaterialsPresent",
   "planogramCompliance",
@@ -470,5 +468,6 @@ module.exports = {
   SECONDARY_DISPLAY_OPTIONS,
   STAFF_RECOMMEND_OPTIONS,
   PAYMENT_STATUS_OPTIONS,
-  PRICING_CATEGORIES,
+  COMPETITOR_BRANDS,
+  COMPETITOR_BRAND_OPTIONS,
 };
