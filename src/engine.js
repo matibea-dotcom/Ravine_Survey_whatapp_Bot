@@ -23,7 +23,7 @@ const GLOBAL_COMMANDS = [
   "RESTART", "EXIT", "SUMMARY",
 ];
 const SURVEY_COMMANDS = ["START", "SKIP", "EDIT", "SUBMIT", "CONFIRM"];
-const ADMIN_COMMANDS = ["REPORT", "PRICING", "COLLECTIONS", "MYDATA", "STATS"];
+const ADMIN_COMMANDS = ["REPORT", "PRICING", "COLLECTIONS", "RECONCILE", "MYDATA", "STATS"];
 
 const recentSubmissions = new Map();
 const registrationStates = new Map();
@@ -772,6 +772,73 @@ async function handleAdminCommand(cmd, replies) {
       } catch (err) {
         console.error("COLLECTIONS failed:", err.message);
         replies.push("⚠️ Couldn't generate the collections report right now. Try again shortly.");
+      }
+      return replies;
+    }
+    case "RECONCILE": {
+      try {
+        const stats = await sheets.computeReconciliationReport();
+        if (!stats.totalStores) {
+          replies.push("No statements or MT submissions yet to reconcile.");
+          return replies;
+        }
+        const money = (n) => `KES ${Math.round(n).toLocaleString()}`;
+        const lines = [
+          "🔍 *Statements vs Field Survey Reconciliation*",
+          `Stores compared: ${stats.totalStores}`,
+          `Total Statement Debt (order system, ground truth): ${money(stats.totalStatementDebt)}`,
+          `Total Survey-Reported Debt (latest field visit): ${money(stats.totalSurveyDebt)}`,
+          "",
+        ];
+
+        if (stats.statusMismatches.length > 0) {
+          lines.push(`🚩 *${stats.statusMismatches.length} store(s) marked "Current" in the field but actually owe money:*`);
+          for (const m of stats.statusMismatches.slice(0, 10)) {
+            lines.push(`• ${m.storeName} — statements show ${money(m.stmtBalance)} owed`);
+          }
+          if (stats.statusMismatches.length > 10) lines.push(`...and ${stats.statusMismatches.length - 10} more`);
+          lines.push("");
+        }
+
+        if (stats.largeDiscrepancies.length > 0) {
+          lines.push(`⚠️ *${stats.largeDiscrepancies.length} store(s) with a balance mismatch over KES 5,000:*`);
+          for (const d of stats.largeDiscrepancies.slice(0, 10)) {
+            lines.push(`• ${d.storeName} — statements ${money(d.stmtBalance)} vs field ${money(d.surveyBalance)} (diff ${money(d.diff)})`);
+          }
+          if (stats.largeDiscrepancies.length > 10) lines.push(`...and ${stats.largeDiscrepancies.length - 10} more`);
+          lines.push("");
+        }
+
+        if (stats.noVisitYet.length > 0) {
+          lines.push(`📍 *${stats.noVisitYet.length} store(s) with real debt but no MT visit on record yet:*`);
+          for (const n of stats.noVisitYet.slice(0, 10)) {
+            lines.push(`• ${n.storeName} — ${money(n.stmtBalance)} across ${n.orderCount} order(s)`);
+          }
+          if (stats.noVisitYet.length > 10) lines.push(`...and ${stats.noVisitYet.length - 10} more`);
+          lines.push("");
+        }
+
+        if (stats.surveyOnly.length > 0) {
+          lines.push(`❓ *${stats.surveyOnly.length} store(s) reported as owing in the field, with no matching statement record:*`);
+          for (const s of stats.surveyOnly.slice(0, 10)) {
+            lines.push(`• ${s.storeName} — field reports ${s.paymentStatus || "overdue"}${s.surveyBalance ? `, ${money(s.surveyBalance)}` : ""}`);
+          }
+          if (stats.surveyOnly.length > 10) lines.push(`...and ${stats.surveyOnly.length - 10} more`);
+        }
+
+        if (
+          stats.statusMismatches.length === 0 &&
+          stats.largeDiscrepancies.length === 0 &&
+          stats.noVisitYet.length === 0 &&
+          stats.surveyOnly.length === 0
+        ) {
+          lines.push("✅ No major discrepancies found between statements and field reports.");
+        }
+
+        replies.push(lines.join("\n"));
+      } catch (err) {
+        console.error("RECONCILE failed:", err.message);
+        replies.push("⚠️ Couldn't generate the reconciliation report right now. Try again shortly.");
       }
       return replies;
     }

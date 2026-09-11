@@ -502,6 +502,96 @@ function unflattenMtSubmission(record) {
 // Outstanding balance and payment-status aging use only the MOST RECENT
 // visit per store, since those represent current account state, not
 // something that should be summed across repeat visits.
+const STATEMENTS_TAB = process.env.GOOGLE_SHEET_TAB_STATEMENTS || "Statements";
+
+// ---- Reconciliation: real order-system debt (Statements tab) vs what
+// agents report in the field (MT_Submissions). Two independent sources of
+// truth that can drift apart — this surfaces where they disagree. ----
+async function computeReconciliationReport() {
+  const { records: statementRecords } = await readAllRows(STATEMENTS_TAB);
+  const mtTab = getSheetTabForTrack("MT");
+  const { records: mtRecords } = await readAllRows(mtTab);
+
+  const statementByStore = new Map(); // storeId -> { totalBalance, orderCount, storeName }
+  for (const r of statementRecords) {
+    if (!r.storeId) continue;
+    const bal = Number(r.balance);
+    if (Number.isNaN(bal)) continue;
+    const entry = statementByStore.get(r.storeId) || { totalBalance: 0, orderCount: 0, storeName: r.customerName };
+    entry.totalBalance += bal;
+    entry.orderCount += 1;
+    entry.storeName = entry.storeName || r.customerName;
+    statementByStore.set(r.storeId, entry);
+  }
+
+  const latestByStore = new Map();
+  for (const r of mtRecords) {
+    if (!r.storeId || !r.submittedAt) continue;
+    const existing = latestByStore.get(r.storeId);
+    if (!existing || new Date(r.submittedAt) > new Date(existing.submittedAt)) {
+      latestByStore.set(r.storeId, r);
+    }
+  }
+
+  const allStoreIds = new Set([...statementByStore.keys(), ...latestByStore.keys()]);
+  const DISCREPANCY_THRESHOLD = 5000; // KES
+
+  const statusMismatches = [];
+  const largeDiscrepancies = [];
+  const noVisitYet = [];
+  const surveyOnly = [];
+
+  for (const storeId of allStoreIds) {
+    const stmt = statementByStore.get(storeId);
+    const survey = latestByStore.get(storeId);
+    const stmtBalance = stmt ? stmt.totalBalance : 0;
+    const surveyBalanceRaw = survey ? Number(survey.outstandingBalance) : NaN;
+    const surveyBalance = Number.isNaN(surveyBalanceRaw) ? 0 : surveyBalanceRaw;
+    const storeName = (stmt && stmt.storeName) || (survey && survey.accountName) || storeId;
+
+    if (stmt && !survey) {
+      noVisitYet.push({ storeId, storeName, stmtBalance, orderCount: stmt.orderCount });
+      continue;
+    }
+    if (!stmt && survey) {
+      const surveyIsOverdue = survey.paymentStatus && survey.paymentStatus !== "Current / Up to Date";
+      if (surveyBalance > 0 || surveyIsOverdue) {
+        surveyOnly.push({ storeId, storeName, surveyBalance, paymentStatus: survey.paymentStatus || "" });
+      }
+      continue;
+    }
+    if (stmt && survey) {
+      if (survey.paymentStatus === "Current / Up to Date" && stmtBalance > 0) {
+        statusMismatches.push({ storeId, storeName, stmtBalance, surveyStatus: survey.paymentStatus });
+      }
+      const diff = Math.abs(stmtBalance - surveyBalance);
+      if (diff >= DISCREPANCY_THRESHOLD) {
+        largeDiscrepancies.push({ storeId, storeName, stmtBalance, surveyBalance, diff });
+      }
+    }
+  }
+
+  largeDiscrepancies.sort((a, b) => b.diff - a.diff);
+  noVisitYet.sort((a, b) => b.stmtBalance - a.stmtBalance);
+  statusMismatches.sort((a, b) => b.stmtBalance - a.stmtBalance);
+
+  const totalStatementDebt = [...statementByStore.values()].reduce((a, b) => a + b.totalBalance, 0);
+  const totalSurveyDebt = [...latestByStore.values()].reduce((a, s) => {
+    const n = Number(s.outstandingBalance);
+    return a + (Number.isNaN(n) ? 0 : n);
+  }, 0);
+
+  return {
+    totalStores: allStoreIds.size,
+    totalStatementDebt,
+    totalSurveyDebt,
+    statusMismatches,
+    largeDiscrepancies,
+    noVisitYet,
+    surveyOnly,
+  };
+}
+
 async function computeCollectionsReport() {
   const tab = getSheetTabForTrack("MT");
   const { records } = await readAllRows(tab);
@@ -703,6 +793,7 @@ module.exports = {
   computeMtReport,
   computePricingReport,
   computeCollectionsReport,
+  computeReconciliationReport,
   getLatestSubmissionForStore,
   unflattenMtSubmission,
 };
