@@ -23,7 +23,7 @@ const GLOBAL_COMMANDS = [
   "RESTART", "EXIT", "SUMMARY",
 ];
 const SURVEY_COMMANDS = ["START", "SKIP", "EDIT", "SUBMIT", "CONFIRM"];
-const ADMIN_COMMANDS = ["REPORT", "MYDATA", "STATS"];
+const ADMIN_COMMANDS = ["REPORT", "PRICING", "COLLECTIONS", "MYDATA", "STATS"];
 
 const recentSubmissions = new Map();
 const registrationStates = new Map();
@@ -80,22 +80,6 @@ function findRecentDuplicate(waId, dupeKey) {
 }
 
 // --- Survey step navigation (track-aware) ---
-// Groups stores by a normalized area/location (trimmed, case-folded) so the
-// agent picks a location first, then a specific store within it, instead of
-// one long flat list. Falls back to "Unspecified" for stores with no area.
-function groupStoresByLocation(stores) {
-  const groups = new Map(); // normalizedKey -> { label, stores: [] }
-  for (const store of stores) {
-    const raw = (store.areaLocation || "").trim();
-    const key = raw ? raw.toLowerCase() : "__unspecified__";
-    if (!groups.has(key)) {
-      groups.set(key, { label: raw || "Unspecified Area", stores: [] });
-    }
-    groups.get(key).stores.push(store);
-  }
-  return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
-}
-
 // Converts a Stores-tab record back into survey answer shape so selecting an
 // existing store pre-fills identity fields exactly as if freshly typed.
 function storeToAnswers(store) {
@@ -230,7 +214,7 @@ function helpText(registered) {
 function summaryText(session) {
   const steps = activeSteps(session);
   const lines = steps
-    .filter((s) => session.answers[s.key] !== undefined)
+    .filter((s) => session.answers[s.key] !== undefined && session.answers[s.key] !== null)
     .map((s) => {
       const v = session.answers[s.key];
       const display = Array.isArray(v)
@@ -713,6 +697,84 @@ async function handleAdminCommand(cmd, replies) {
       }
       return replies;
     }
+    case "PRICING": {
+      try {
+        const stats = await sheets.computePricingReport();
+        if (!stats.totalVisits) {
+          replies.push("No MT submissions yet to report on.");
+          return replies;
+        }
+        const num = (n, d = 1) => (n == null ? "n/a" : n.toFixed(d));
+        const idx = (n) => (n == null ? "n/a" : n.toFixed(3));
+
+        const lines = [
+          "💰 *MT Pricing Dashboard*",
+          `Visits analyzed: ${stats.totalVisits}`,
+          `Ravine Avg Reference Price: KES ${num(stats.overallRavineAvg)}`,
+          `Named Brand Avg Price: KES ${num(stats.overallCompetitorAvg)}`,
+          `Ravine Price Index: ${idx(stats.overallPriceIndex)}` +
+            (stats.overallPriceIndex != null
+              ? stats.overallPriceIndex < 1
+                ? ` (Ravine trades ${Math.round((1 - stats.overallPriceIndex) * 100)}% below competitors)`
+                : ` (Ravine trades ${Math.round((stats.overallPriceIndex - 1) * 100)}% above competitors)`
+              : ""),
+          `Promo Observations: ${stats.promoObservations}`,
+          "",
+          "*By Category*",
+        ];
+        for (const c of stats.categories) {
+          lines.push(
+            `${c.category}: Ravine KES ${num(c.ravineAvg)} vs Competitors KES ${num(c.competitorAvg)}` +
+              (c.priceIndex != null ? ` — Index ${idx(c.priceIndex)}` : " — not enough data") +
+              ` (${c.ravineObservations} Ravine / ${c.competitorObservations} competitor obs.)`
+          );
+        }
+        replies.push(lines.join("\n"));
+      } catch (err) {
+        console.error("PRICING failed:", err.message);
+        replies.push("⚠️ Couldn't generate the pricing dashboard right now. Try again shortly.");
+      }
+      return replies;
+    }
+    case "COLLECTIONS": {
+      try {
+        const stats = await sheets.computeCollectionsReport();
+        if (!stats.totalVisits) {
+          replies.push("No MT submissions yet to report on.");
+          return replies;
+        }
+        const money = (n) => `KES ${Math.round(n).toLocaleString()}`;
+
+        const lines = [
+          "💵 *MT Collections Report*",
+          `Accounts tracked: ${stats.accountsTracked}`,
+          `Total Collected (all visits): ${money(stats.totalCollected)}`,
+          `Total Outstanding (latest per account): ${money(stats.totalOutstanding)} across ${stats.outstandingCount} account(s)`,
+          "",
+          "*Payment Status (latest per account)*",
+          `Current: ${stats.aging["Current / Up to Date"]}`,
+          `Overdue 1-7 days: ${stats.aging["Overdue (1-7 days)"]}`,
+          `Overdue 8-14 days: ${stats.aging["Overdue (8-14 days)"]}`,
+          `Overdue 14+ days: ${stats.aging["Overdue (14+ days)"]}`,
+        ];
+        if (stats.overdueNoCommitment.length > 0) {
+          lines.push("", `⚠️ *${stats.overdueNoCommitment.length} overdue account(s) with NO written commitment:*`);
+          for (const a of stats.overdueNoCommitment.slice(0, 15)) {
+            lines.push(`• ${a.accountName} — ${a.paymentStatus}${a.outstandingBalance ? ` (${money(a.outstandingBalance)})` : ""}`);
+          }
+          if (stats.overdueNoCommitment.length > 15) {
+            lines.push(`...and ${stats.overdueNoCommitment.length - 15} more`);
+          }
+        } else {
+          lines.push("", "✅ All overdue accounts have a written commitment on file.");
+        }
+        replies.push(lines.join("\n"));
+      } catch (err) {
+        console.error("COLLECTIONS failed:", err.message);
+        replies.push("⚠️ Couldn't generate the collections report right now. Try again shortly.");
+      }
+      return replies;
+    }
     case "MYDATA":
       replies.push("Your submission history will be sent shortly.");
       return replies;
@@ -1019,34 +1081,16 @@ async function handleInboundMessage(waId, message) {
     session = sessionStore.newSession(waId);
     session.track = agent.surveyTrack || "GT";
 
-    // Phase 1: Stores registry — MT agents pick a known store instead of
-    // retyping identity fields every visit, or register a new one.
+    // Phase 6: ask New Outlet vs Revisit first, instead of ever showing a
+    // long list up front. New -> straight to blank identity questions.
+    // Revisit -> type the outlet name, search by it.
     if (session.track === "MT") {
-      let stores = [];
-      try {
-        stores = await sheets.readAllStores("MT");
-      } catch (err) {
-        console.error("Failed to load stores list:", err.message);
-      }
-      if (stores.length > 0) {
-        const groups = groupStoresByLocation(stores);
-        if (groups.length === 1 && groups[0].stores.length === 1) {
-          // Only one store total — skip straight to it rather than a
-          // one-item menu.
-          replies.push(`New ${trackLabel(session.track)} survey started (Ref: ${session.sessionId}).`);
-          replies.push(...(await selectStoreAndContinue(session, groups[0].stores[0])));
-          return replies;
-        }
-        session.storeFlow = "choosingLocation";
-        session.locationChoices = groups;
-        replies.push(
-          `New ${trackLabel(session.track)} survey started (Ref: ${session.sessionId}).\n\n` +
-            "Which area are you visiting?\n" +
-            groups.map((g, i) => `${i + 1}. ${g.label} (${g.stores.length})`).join("\n") +
-            "\n\nReply with a number, or type NEW to register a new store."
-        );
-        return replies;
-      }
+      session.storeFlow = "newOrRevisit";
+      replies.push(
+        `New ${trackLabel(session.track)} survey started (Ref: ${session.sessionId}).\n\n` +
+          "Is this a *new outlet* you haven't visited before, or a *revisit*?\n1. New Outlet\n2. Revisit"
+      );
+      return replies;
     }
 
     replies.push(`New ${trackLabel(session.track)} survey started (Ref: ${session.sessionId}). Type HELP any time for commands.\n\n${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
@@ -1062,64 +1106,63 @@ async function handleInboundMessage(waId, message) {
 
   sessionStore.touch(session);
 
-  // --- Store selection flow (Phase 1/5: Stores registry, MT only) ---
-  // Step A: pick an area/location.
-  if (session.storeFlow === "choosingLocation") {
-    if (upper === "NEW") {
+  // --- Store selection flow (Phase 1/6: Stores registry, MT only) ---
+  // Step A: new outlet, or a revisit?
+  if (session.storeFlow === "newOrRevisit") {
+    if (upper === "1" || upper === "NEW" || upper.startsWith("NEW ")) {
       session.storeFlow = null;
-      session.locationChoices = null;
       replies.push(`${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
       return replies;
     }
-    const idx = Number(rawText.trim());
-    const groups = session.locationChoices || [];
-    if (Number.isInteger(idx) && idx >= 1 && idx <= groups.length) {
-      const group = groups[idx - 1];
-      if (group.stores.length === 1) {
-        replies.push(...(await selectStoreAndContinue(session, group.stores[0])));
-        return replies;
-      }
-      session.storeFlow = "choosing";
-      session.storeChoices = group.stores;
-      session.locationChoices = null;
-      replies.push(
-        `Which store in *${group.label}*?\n` +
-          group.stores.map((s, i) => `${i + 1}. ${s.storeName}`).join("\n") +
-          "\n\nReply with a number, or type NEW to register a new store."
-      );
+    if (upper === "2" || upper.startsWith("REVISIT")) {
+      session.storeFlow = "awaitingOutletNameSearch";
+      replies.push("What is the *outlet name*? (type all or part of it)");
       return replies;
     }
+    replies.push("Please reply *1* for New Outlet, or *2* for Revisit.");
+    return replies;
+  }
 
-    // Not a valid location number — try it as a store-name search instead,
-    // across ALL stores regardless of location.
+  // Step B: agent typed (part of) the outlet name — search for it.
+  if (session.storeFlow === "awaitingOutletNameSearch") {
+    if (upper === "NEW") {
+      session.storeFlow = null;
+      replies.push(`${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
+      return replies;
+    }
     const query = rawText.trim().toLowerCase();
     if (query.length < 2) {
-      replies.push(`Please reply with a number from 1 to ${groups.length}, type NEW to register a new store, or type part of a store name to search.`);
+      replies.push("Please type at least 2 characters of the outlet name, or type NEW to register it as a new outlet.");
       return replies;
     }
-    const allStores = groups.flatMap((g) => g.stores);
-    const matches = allStores.filter((s) => s.storeName.toLowerCase().includes(query));
+    let stores = [];
+    try {
+      stores = await sheets.readAllStores("MT");
+    } catch (err) {
+      console.error("Failed to load stores list:", err.message);
+    }
+    const matches = stores.filter((s) => s.storeName.toLowerCase().includes(query));
     if (matches.length === 0) {
-      replies.push(`No stores matched "${rawText.trim()}". Reply with a location number, NEW, or try a different search term.`);
+      replies.push(`No outlet found matching "${rawText.trim()}". Try a different spelling, or type NEW to register it as a new outlet.`);
       return replies;
     }
     if (matches.length === 1) {
+      session.storeFlow = null;
       replies.push(...(await selectStoreAndContinue(session, matches[0])));
       return replies;
     }
     const shown = matches.slice(0, 15);
     session.storeFlow = "choosing";
     session.storeChoices = shown;
-    session.locationChoices = null;
     replies.push(
-      `Found ${matches.length} matching store(s)${matches.length > 15 ? " (showing first 15)" : ""}:\n` +
+      `Found ${matches.length} matching outlet(s)${matches.length > 15 ? " (showing first 15)" : ""}:\n` +
         shown.map((s, i) => `${i + 1}. ${s.storeName} (${s.areaLocation})`).join("\n") +
-        "\n\nReply with a number, or type NEW to register a new store."
+        "\n\nReply with a number, or type NEW to register a new outlet."
     );
     return replies;
   }
 
-  // Step B: pick a specific store within the chosen location (or the direct
+  // Step C: pick a specific store within the chosen location (or the direct
   // single-store-total shortcut from START).
   if (session.storeFlow === "choosing") {
     if (upper === "NEW") {

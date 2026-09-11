@@ -422,7 +422,7 @@ function unflattenMtSubmission(record) {
     "shelfPosition", "priceVsCompetitor", "priceDifferenceAmount", "shelfVisibilityRating",
     "brandsNextToRavine", "otherDairyCategoriesNote", "planogramCompliance", "secondaryDisplay",
     "staffCanRecommend", "issuesObserved", "merchandisingOpportunities", "paymentStatus",
-    "collectionAmount", "writtenCommitmentObtained", "shortExpiryPresent", "shortExpiryAction",
+    "outstandingBalance", "writtenCommitmentObtained", "shortExpiryPresent", "shortExpiryAction",
     "additionalRecommendations",
   ];
   for (const key of SIMPLE_FIELDS) {
@@ -492,6 +492,152 @@ function unflattenMtSubmission(record) {
   return a;
 }
 
+// ---- Pricing dashboard (Ravine price index vs named-brand competitors) ----
+// Computed per RAVINE_CATEGORIES (Long Life Milk/Yoghurt/Lala/Others) since
+// individual SKU-to-competitor-product matching isn't reliable, but both
+// Ravine's own catalog and competitor brands already share this category
+// taxonomy — see mt.js.
+// ---- Collections dashboard ----
+// Total collected sums across ALL visits (money is cumulative over time).
+// Outstanding balance and payment-status aging use only the MOST RECENT
+// visit per store, since those represent current account state, not
+// something that should be summed across repeat visits.
+async function computeCollectionsReport() {
+  const tab = getSheetTabForTrack("MT");
+  const { records } = await readAllRows(tab);
+  if (records.length === 0) return { totalVisits: 0 };
+
+  let totalCollected = 0;
+  for (const r of records) {
+    const amt = Number(r.collectionAmount);
+    if (!Number.isNaN(amt) && amt > 0) totalCollected += amt;
+  }
+
+  const latestByStore = new Map();
+  for (const r of records) {
+    if (!r.storeId || !r.submittedAt) continue;
+    const existing = latestByStore.get(r.storeId);
+    if (!existing || new Date(r.submittedAt) > new Date(existing.submittedAt)) {
+      latestByStore.set(r.storeId, r);
+    }
+  }
+  const snapshots = [...latestByStore.values()];
+
+  let totalOutstanding = 0;
+  let outstandingCount = 0;
+  const aging = {
+    "Current / Up to Date": 0,
+    "Overdue (1-7 days)": 0,
+    "Overdue (8-14 days)": 0,
+    "Overdue (14+ days)": 0,
+  };
+  const overdueNoCommitment = [];
+
+  for (const s of snapshots) {
+    const bal = Number(s.outstandingBalance);
+    if (!Number.isNaN(bal) && bal > 0) {
+      totalOutstanding += bal;
+      outstandingCount += 1;
+    }
+    if (s.paymentStatus && Object.prototype.hasOwnProperty.call(aging, s.paymentStatus)) {
+      aging[s.paymentStatus] += 1;
+    }
+    const isOverdue = s.paymentStatus && s.paymentStatus !== "Current / Up to Date";
+    if (isOverdue && s.writtenCommitmentObtained !== "Yes") {
+      overdueNoCommitment.push({
+        accountName: s.accountName,
+        paymentStatus: s.paymentStatus,
+        outstandingBalance: !Number.isNaN(bal) && bal > 0 ? bal : null,
+      });
+    }
+  }
+
+  return {
+    totalVisits: records.length,
+    accountsTracked: snapshots.length,
+    totalCollected,
+    totalOutstanding,
+    outstandingCount,
+    aging,
+    overdueNoCommitment,
+  };
+}
+
+async function computePricingReport() {
+  const tab = getSheetTabForTrack("MT");
+  const { records } = await readAllRows(tab);
+  if (records.length === 0) return { totalVisits: 0 };
+
+  const byCategory = {}; // category -> { ravinePrices: [], competitorPrices: [] }
+  const ensureCat = (cat) => {
+    if (!byCategory[cat]) byCategory[cat] = { ravinePrices: [], competitorPrices: [] };
+    return byCategory[cat];
+  };
+
+  let promoObservations = 0;
+
+  for (const r of records) {
+    for (const entry of RAVINE_SKU_LIST) {
+      const retail = r[`${entry.sku} (Retail/Piece)`];
+      if (retail !== undefined && retail !== "") {
+        const n = Number(retail);
+        if (!Number.isNaN(n) && n > 0) {
+          ensureCat(RAVINE_SKU_TO_CATEGORY[entry.sku]).ravinePrices.push(n);
+        }
+      }
+    }
+    for (const brand of COMPETITOR_BRANDS) {
+      const regular = r[`${brand} Regular Price`];
+      const promo = r[`${brand} Promo Price`];
+      const cats = r[`${brand} Categories`];
+      if (regular === undefined || regular === "" || !cats) continue;
+      const regNum = Number(regular);
+      if (Number.isNaN(regNum) || regNum <= 0) continue;
+      const catList = cats.split(", ").filter(Boolean);
+      for (const cat of catList) {
+        ensureCat(cat).competitorPrices.push(regNum);
+      }
+      if (promo !== undefined && promo !== "" && !Number.isNaN(Number(promo)) && Number(promo) > 0) {
+        promoObservations += 1;
+      }
+    }
+  }
+
+  const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
+
+  const categories = Object.keys(byCategory)
+    .map((cat) => {
+      const ravineAvg = avg(byCategory[cat].ravinePrices);
+      const competitorAvg = avg(byCategory[cat].competitorPrices);
+      return {
+        category: cat,
+        ravineAvg,
+        competitorAvg,
+        priceIndex: ravineAvg != null && competitorAvg != null && competitorAvg > 0 ? ravineAvg / competitorAvg : null,
+        ravineObservations: byCategory[cat].ravinePrices.length,
+        competitorObservations: byCategory[cat].competitorPrices.length,
+      };
+    })
+    .filter((c) => c.ravineObservations > 0 || c.competitorObservations > 0);
+
+  const allRavinePrices = categories.flatMap((c) => byCategory[c.category].ravinePrices);
+  const allCompetitorPrices = categories.flatMap((c) => byCategory[c.category].competitorPrices);
+  const overallRavineAvg = avg(allRavinePrices);
+  const overallCompetitorAvg = avg(allCompetitorPrices);
+
+  return {
+    totalVisits: records.length,
+    overallRavineAvg,
+    overallCompetitorAvg,
+    overallPriceIndex:
+      overallRavineAvg != null && overallCompetitorAvg != null && overallCompetitorAvg > 0
+        ? overallRavineAvg / overallCompetitorAvg
+        : null,
+    promoObservations,
+    categories,
+  };
+}
+
 async function computeMtReport() {
   const tab = getSheetTabForTrack("MT");
   const { records } = await readAllRows(tab);
@@ -555,6 +701,8 @@ module.exports = {
   readAllStores,
   appendStore,
   computeMtReport,
+  computePricingReport,
+  computeCollectionsReport,
   getLatestSubmissionForStore,
   unflattenMtSubmission,
 };
