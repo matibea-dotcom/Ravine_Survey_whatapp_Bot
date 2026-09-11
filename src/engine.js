@@ -543,6 +543,9 @@ function processAnswer(step, message, answers) {
   if (step.type === "photo") {
     return validators.validatePhoto(message);
   }
+  if (message.type !== "text") {
+    return { ok: false, error: "Please reply with text for this question." };
+  }
   const raw = getRawText(message);
   switch (step.type) {
     case "text":
@@ -1018,9 +1021,51 @@ async function handleInboundMessage(waId, message) {
     }
     const chosen = stores[idx - 1];
     Object.assign(session.answers, storeToAnswers(chosen));
-    session.storeFlow = null;
     session.storeChoices = null;
+
+    // Phase 4: if this store has a prior visit, offer to prefill everything
+    // from it before starting the normal blank-slate flow.
+    let lastVisit = null;
+    try {
+      const rawRecord = await sheets.getLatestSubmissionForStore(chosen.storeId);
+      if (rawRecord) lastVisit = sheets.unflattenMtSubmission(rawRecord);
+    } catch (err) {
+      console.error("Failed to load prior visit for store:", err.message);
+    }
+
+    if (lastVisit && Object.keys(lastVisit).length > 0) {
+      session.storeFlow = "confirmingHistory";
+      session.pendingHistoryAnswers = lastVisit;
+      replies.push(
+        `📋 This store has a previous visit on record.\n\n` +
+          summaryText({ answers: lastVisit, track: session.track }) +
+          "\n\nReply CONFIRM to start from these values (you can still EDIT any field before submitting), or type NEW to start blank."
+      );
+      return replies;
+    }
+
+    session.storeFlow = null;
     replies.push(`✅ Store selected: *${chosen.storeName}*.\n\n${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
+    return replies;
+  }
+
+  // --- Prior-visit prefill confirmation (Phase 4) ---
+  if (session.storeFlow === "confirmingHistory") {
+    if (upper === "CONFIRM") {
+      Object.assign(session.answers, session.pendingHistoryAnswers);
+      session.storeFlow = null;
+      session.pendingHistoryAnswers = null;
+      session.stepIndex = activeSteps(session).length; // jump straight to the "complete" state
+      replies.push(...promptForCurrentOrSummary(session));
+      return replies;
+    }
+    if (upper === "NEW") {
+      session.storeFlow = null;
+      session.pendingHistoryAnswers = null;
+      replies.push(`${stepPrompt(currentStep(session), session.answers)}\n\n${progressLine(session)}`);
+      return replies;
+    }
+    replies.push("Reply CONFIRM to start from last visit's values, or NEW to start blank.");
     return replies;
   }
 
@@ -1149,6 +1194,15 @@ async function handleInboundMessage(waId, message) {
 
   if (targetKey) {
     session.editingField = null;
+    // An edit can retroactively unskip a later field (e.g. changing payment
+    // status to overdue un-skips the written-commitment question). Re-land
+    // on the first still-unanswered active step so a stale stepIndex can't
+    // land on — and silently overwrite — the wrong field on the agent's
+    // next message. Same class of bug as the advance() fix, different
+    // trigger (EDIT rather than normal forward progression).
+    const active = activeSteps(session);
+    const firstUnanswered = active.findIndex((s) => s.required && session.answers[s.key] === undefined);
+    session.stepIndex = firstUnanswered === -1 ? active.length : firstUnanswered;
     replies.push(`✅ Updated *${step.label}*.` + (flagNote ? ` (${flagNote})` : ""));
     replies.push("Type SUMMARY to review, or SUBMIT if you're done.");
     return replies;

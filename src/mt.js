@@ -57,6 +57,11 @@ const RAVINE_CATALOG = {
 // Flat list + name->entry index, used for the pricing loop and Sheets columns.
 const RAVINE_SKU_LIST = Object.values(RAVINE_CATALOG).flat();
 const RAVINE_SKU_INDEX = Object.fromEntries(RAVINE_SKU_LIST.map((e) => [e.sku, e]));
+// Reverse lookup (sku -> category name), used to reconstruct
+// ravineCategoriesStocked when replaying a prior visit's answers (Phase 4).
+const RAVINE_SKU_TO_CATEGORY = Object.fromEntries(
+  Object.entries(RAVINE_CATALOG).flatMap(([cat, entries]) => entries.map((e) => [e.sku, cat]))
+);
 
 const STORE_TYPE_OPTIONS = ["Supermarket", "Mini-mart", "Kiosk/Duka", "Other"];
 const DIGITAL_PATH_STATUS_OPTIONS = ["Active / Working", "Disabled / Closed", "Not Used at This Account"];
@@ -458,6 +463,7 @@ module.exports = {
   RAVINE_CATALOG,
   RAVINE_SKU_LIST,
   RAVINE_SKU_INDEX,
+  RAVINE_SKU_TO_CATEGORY,
   STORE_TYPE_OPTIONS,
   DIGITAL_PATH_STATUS_OPTIONS,
   SHELF_POSITION_OPTIONS,

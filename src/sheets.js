@@ -1,7 +1,7 @@
 const { google } = require("googleapis");
 const path = require("path");
 const { getColumnsForTrack, getSheetTabForTrack } = require("./surveys");
-const { RAVINE_SKU_LIST, COMPETITOR_BRANDS } = require("./surveys/mt");
+const { RAVINE_SKU_LIST, RAVINE_SKU_TO_CATEGORY, COMPETITOR_BRANDS } = require("./surveys/mt");
 
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID;
 const KEY_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "./service-account.json";
@@ -369,6 +369,129 @@ async function appendSubmission(submission) {
 // (valid visits, % Ravine stocked, % out-of-stock, avg visibility, avg
 // facings, % full planogram, % POS presence) directly from MT_Submissions,
 // so REPORT can return them live instead of needing a hand-built dashboard.
+// ---- Phase 4: "remember last visit" ----
+
+/**
+ * Returns the most recent MT_Submissions record for a given storeId, or null
+ * if this store has no submissions yet. Records are raw flattened rows
+ * (string values, as read from the sheet) — pass through unflattenMtSubmission
+ * to get back the nested answers shape the survey engine works with.
+ */
+async function getLatestSubmissionForStore(storeId) {
+  if (!storeId) return null;
+  const tab = getSheetTabForTrack("MT");
+  const { records } = await readAllRows(tab);
+  const matches = records.filter((r) => r.storeId === storeId && r.submittedAt);
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
+  return matches[0];
+}
+
+/**
+ * Inverse of flattenSubmission for MT — reconstructs the nested `answers`
+ * shape from a raw flattened sheet record, so a prior visit's data can be
+ * reloaded as a starting point for a new one.
+ *
+ * Known lossy spots (documented, not bugs):
+ * - "Other" competitor brands (typed names) are NOT reconstructed — too
+ *   fragile to reliably parse back out of the free-text catch-all column.
+ * - Competitor brand RANK ORDER is not preserved, only which brands had
+ *   data and their categories/pricing (object key order is used as a
+ *   best-effort stand-in, which usually matches insertion/column order).
+ * - The photo is never carried over — always asked fresh on every visit.
+ */
+function unflattenMtSubmission(record) {
+  const a = {};
+
+  const IDENTITY_FIELDS = ["accountName", "storeType", "contactName", "contactNumber", "areaLocation"];
+  for (const key of IDENTITY_FIELDS) {
+    if (record[key]) a[key] = record[key];
+  }
+  if (record.gpsLat || record.gpsLng || record.gpsAddress) {
+    a.gpsLocation = {
+      lat: record.gpsLat !== "" ? parseFloat(record.gpsLat) : null,
+      lng: record.gpsLng !== "" ? parseFloat(record.gpsLng) : null,
+      address: record.gpsAddress || null,
+      source: record.gpsSource || "stored",
+      capturedAt: new Date().toISOString(),
+    };
+  }
+
+  const SIMPLE_FIELDS = [
+    "digitalPathStatus", "digitalPathIssueNote", "pendingOrders", "ravineStocked",
+    "shelfPosition", "priceVsCompetitor", "priceDifferenceAmount", "shelfVisibilityRating",
+    "brandsNextToRavine", "otherDairyCategoriesNote", "planogramCompliance", "secondaryDisplay",
+    "staffCanRecommend", "issuesObserved", "merchandisingOpportunities", "paymentStatus",
+    "collectionAmount", "writtenCommitmentObtained", "shortExpiryPresent", "shortExpiryAction",
+    "additionalRecommendations",
+  ];
+  for (const key of SIMPLE_FIELDS) {
+    if (record[key] !== undefined && record[key] !== "") a[key] = record[key];
+  }
+  if (record.posMaterialsPresent) a.posMaterialsPresent = record.posMaterialsPresent.split(", ").filter(Boolean);
+
+  // Per-SKU Ravine pricing/facings/stock status -> also derive
+  // skusStocked + ravineCategoriesStocked from whichever SKUs have data.
+  const ravineSkuPricing = {};
+  const ravineSkuDetails = {};
+  const skusStocked = [];
+  const categoriesStocked = new Set();
+  for (const entry of RAVINE_SKU_LIST) {
+    const ws = record[`${entry.sku} (WS/Carton)`];
+    const retail = record[`${entry.sku} (Retail/Piece)`];
+    const facings = record[`${entry.sku} Facings`];
+    const stockStatus = record[`${entry.sku} Stock Status`];
+    const stockStatusNote = record[`${entry.sku} Stock Status Note`];
+    if (!stockStatus && !ws && !retail && !facings) continue; // this SKU wasn't part of that visit
+    skusStocked.push(entry.sku);
+    categoriesStocked.add(RAVINE_SKU_TO_CATEGORY[entry.sku]);
+    if (ws || retail) {
+      ravineSkuPricing[entry.sku] = {
+        wsPerCarton: ws !== "" ? Number(ws) : null,
+        retailPerPiece: retail !== "" ? Number(retail) : null,
+        source: "catalog",
+      };
+    }
+    if (facings || stockStatus) {
+      ravineSkuDetails[entry.sku] = {
+        facings: facings !== "" ? Number(facings) : null,
+        stockStatus: stockStatus || null,
+        stockStatusNote: stockStatusNote || undefined,
+      };
+    }
+  }
+  if (skusStocked.length > 0) {
+    a.skusStocked = skusStocked;
+    a.ravineCategoriesStocked = [...categoriesStocked];
+    a.ravineSkuPricing = ravineSkuPricing;
+    a.ravineSkuDetails = ravineSkuDetails;
+  }
+
+  // Competitor brands (known 7 only — see doc comment above).
+  const competitorCategories = {};
+  const competitorPricing = {};
+  const rankedBrands = [];
+  for (const brand of COMPETITOR_BRANDS) {
+    const cats = record[`${brand} Categories`];
+    const regular = record[`${brand} Regular Price`];
+    const promo = record[`${brand} Promo Price`];
+    if (!cats && !regular) continue;
+    rankedBrands.push(brand);
+    if (cats) competitorCategories[brand] = cats.split(", ").filter(Boolean);
+    competitorPricing[brand] = {
+      regular: regular !== "" ? Number(regular) : null,
+      promo: promo !== "" ? Number(promo) : null,
+    };
+  }
+  if (rankedBrands.length > 0) {
+    a.competitorBrandsRanked = rankedBrands;
+    a.competitorCategories = competitorCategories;
+    a.competitorPricing = competitorPricing;
+  }
+
+  return a;
+}
+
 async function computeMtReport() {
   const tab = getSheetTabForTrack("MT");
   const { records } = await readAllRows(tab);
@@ -432,4 +555,6 @@ module.exports = {
   readAllStores,
   appendStore,
   computeMtReport,
+  getLatestSubmissionForStore,
+  unflattenMtSubmission,
 };
