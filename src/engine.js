@@ -2,6 +2,7 @@ const sessionStore = require("./sessionStore");
 const agentStore = require("./agentStore");
 const validators = require("./validators");
 const sheets = require("./sheets");
+const { parseCompetitorPriceText } = require("./competitorPriceParser");
 const {
   REGISTRATION_STEPS,
   TRACK_ORDER,
@@ -964,6 +965,40 @@ async function finalizeSubmit(waId, agent, session, replies) {
     session.status = "submitted";
     session.pendingSubmit = false;
     replies.push(`✅ Survey submitted! Reference: *${referenceNumber}*\n\nThank you, ${agent.fullName}. Type START to begin another survey.`);
+
+    // Best-effort: parse the free-text per-category competitor pricing into
+    // structured rows for the live price matrix. Failure here must never
+    // block the main submission — the survey itself already saved fine.
+    if (session.track === "MT" && session.answers.competitorCategoryPricing) {
+      try {
+        const detailRows = [];
+        for (const [brand, byCategory] of Object.entries(session.answers.competitorCategoryPricing)) {
+          for (const [category, rawText] of Object.entries(byCategory)) {
+            const parsed = parseCompetitorPriceText(rawText);
+            for (const entry of parsed) {
+              detailRows.push({
+                referenceNumber,
+                submittedAt: submission.submittedAt,
+                storeId: session.answers.storeId || "",
+                accountName: session.answers.accountName || "",
+                brand,
+                category,
+                variant: entry.variant,
+                regularPrice: entry.regular ?? "",
+                promoPrice: entry.promo ?? "",
+                parsed: entry.parsed ? "Yes" : "No",
+                rawLine: entry.raw,
+              });
+            }
+          }
+        }
+        if (detailRows.length > 0) {
+          await sheets.appendCompetitorPriceDetails(detailRows);
+        }
+      } catch (err) {
+        console.error("Competitor price detail parsing/write failed (non-blocking):", err.message);
+      }
+    }
   } catch (err) {
     console.error("Sheets append failed:", err.message);
     replies.push(`⚠️ Something went wrong saving your survey. Your progress is safe — reference ${referenceNumber}. Type RESUME to try again shortly.`);

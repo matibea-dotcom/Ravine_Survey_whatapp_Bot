@@ -375,6 +375,31 @@ async function appendSubmission(submission) {
   });
 }
 
+const COMPETITOR_PRICE_DETAIL_TAB = process.env.GOOGLE_SHEET_TAB_COMPETITOR_PRICE_DETAIL || "CompetitorPriceDetail";
+const COMPETITOR_PRICE_DETAIL_COLUMNS = [
+  "referenceNumber", "submittedAt", "storeId", "accountName", "brand",
+  "category", "variant", "regularPrice", "promoPrice", "parsed", "rawLine",
+];
+
+// Long-format table: one row per parsed product mention from the free-text
+// per-category competitor pricing (see mt.js's competitor loop and
+// competitorPriceParser.js). This is what a live per-SKU price matrix
+// dashboard should pivot from — variant names are free-form, not
+// guaranteed to match Ravine's own SKU names exactly.
+async function appendCompetitorPriceDetails(rows) {
+  if (!rows || rows.length === 0) return;
+  await ensureHeaderHasColumns(COMPETITOR_PRICE_DETAIL_TAB, COMPETITOR_PRICE_DETAIL_COLUMNS);
+  const sheetsApi = await getClient();
+  const values = rows.map((r) => COMPETITOR_PRICE_DETAIL_COLUMNS.map((c) => r[c] ?? ""));
+  await sheetsApi.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${COMPETITOR_PRICE_DETAIL_TAB}!A1`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values },
+  });
+}
+
 // ---- MT decision-support report (Phase 2.5) ----
 // Computes the same headline KPIs as the manually-built Merch Dashboard
 // (valid visits, % Ravine stocked, % out-of-stock, avg visibility, avg
@@ -810,6 +835,7 @@ module.exports = {
   updateAgentRow,
   deleteAgent,
   appendSubmission,
+  appendCompetitorPriceDetails,
   readAllStores,
   appendStore,
   computeMtReport,
