@@ -438,7 +438,10 @@ const COLUMNS = [
   "shelfVisibilityRating",
   "brandsNextToRavine",
   "competitorBrandsRanked",
-  ...COMPETITOR_BRANDS.flatMap((b) => [`${b} Categories`, `${b} Regular Price`, `${b} Promo Price`]),
+  ...COMPETITOR_BRANDS.flatMap((b) => [
+    `${b} Categories`, `${b} Regular Price`, `${b} Promo Price`,
+    ...RAVINE_CATEGORIES.map((c) => `${b} ${c} Detail`),
+  ]),
   "Other Competitor Brands & Pricing", // catch-all for any brand not in the fixed 7
   "otherDairyCategoriesNote",
   "posMaterialsPresent",

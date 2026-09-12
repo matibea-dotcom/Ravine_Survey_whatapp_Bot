@@ -1,7 +1,7 @@
 const { google } = require("googleapis");
 const path = require("path");
 const { getColumnsForTrack, getSheetTabForTrack } = require("./surveys");
-const { RAVINE_SKU_LIST, RAVINE_SKU_TO_CATEGORY, COMPETITOR_BRANDS } = require("./surveys/mt");
+const { RAVINE_SKU_LIST, RAVINE_SKU_TO_CATEGORY, COMPETITOR_BRANDS, RAVINE_CATEGORIES } = require("./surveys/mt");
 
 const SPREADSHEET_ID = process.env.GOOGLE_SHEET_ID;
 const KEY_FILE = process.env.GOOGLE_SERVICE_ACCOUNT_FILE || "./service-account.json";
@@ -252,6 +252,7 @@ function flattenSubmission(submission, columns) {
   const ravineDetails = a.ravineSkuDetails || {};
   const competitorCategories = a.competitorCategories || {};
   const competitorPricing = a.competitorPricing || {};
+  const competitorCategoryPricing = a.competitorCategoryPricing || {};
   const photo = a.shelfPhoto || {};
   const WS_SUFFIX = " (WS/Carton)";
   const RETAIL_SUFFIX = " (Retail/Piece)";
@@ -261,6 +262,12 @@ function flattenSubmission(submission, columns) {
   const CAT_SUFFIX = " Categories";
   const REG_PRICE_SUFFIX = " Regular Price";
   const PROMO_PRICE_SUFFIX = " Promo Price";
+  const detailColumnMap = new Map(); // "Brand Category Detail" -> [brand, category]
+  for (const b of COMPETITOR_BRANDS) {
+    for (const c of RAVINE_CATEGORIES) {
+      detailColumnMap.set(`${b} ${c} Detail`, [b, c]);
+    }
+  }
 
   return columns.map((col) => {
     switch (col) {
@@ -296,6 +303,10 @@ function flattenSubmission(submission, columns) {
       }
       case "flags": return (submission.flags || []).join("; ");
       default: {
+        if (detailColumnMap.has(col)) {
+          const [brand, category] = detailColumnMap.get(col);
+          return competitorCategoryPricing[brand]?.[category] ?? "";
+        }
         if (col.endsWith(CAT_SUFFIX)) {
           const brand = col.slice(0, -CAT_SUFFIX.length);
           if (COMPETITOR_BRANDS.includes(brand)) return (competitorCategories[brand] || []).join(", ");
@@ -470,6 +481,7 @@ function unflattenMtSubmission(record) {
   // Competitor brands (known 7 only — see doc comment above).
   const competitorCategories = {};
   const competitorPricing = {};
+  const competitorCategoryPricing = {};
   const rankedBrands = [];
   for (const brand of COMPETITOR_BRANDS) {
     const cats = record[`${brand} Categories`];
@@ -482,11 +494,21 @@ function unflattenMtSubmission(record) {
       regular: regular !== "" ? Number(regular) : null,
       promo: promo !== "" ? Number(promo) : null,
     };
+    for (const category of RAVINE_CATEGORIES) {
+      const detail = record[`${brand} ${category} Detail`];
+      if (detail) {
+        competitorCategoryPricing[brand] = competitorCategoryPricing[brand] || {};
+        competitorCategoryPricing[brand][category] = detail;
+      }
+    }
   }
   if (rankedBrands.length > 0) {
     a.competitorBrandsRanked = rankedBrands;
     a.competitorCategories = competitorCategories;
     a.competitorPricing = competitorPricing;
+    if (Object.keys(competitorCategoryPricing).length > 0) {
+      a.competitorCategoryPricing = competitorCategoryPricing;
+    }
   }
 
   return a;

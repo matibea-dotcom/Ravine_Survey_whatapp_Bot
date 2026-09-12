@@ -486,7 +486,7 @@ function expandOtherBrands(rankedBrands, otherNames) {
 }
 
 function startCompetitorLoop(session, brands, stepKey) {
-  session.competitorLoop = { brands, brandIndex: 0, stage: "categories", stepKey };
+  session.competitorLoop = { brands, brandIndex: 0, stage: "categories", categoryIndex: 0, stepKey };
 }
 
 function promptForCompetitorLoopOrContinue(session) {
@@ -508,6 +508,15 @@ function promptForCompetitorLoopOrContinue(session) {
   }
   if (loop.stage === "promoPrice") {
     return [`Does *${brand}* have a *promotional price* right now? Reply with the amount (KES), or SKIP if none.`];
+  }
+  if (loop.stage === "categoryPricing") {
+    const cats = session.answers.competitorCategories[brand] || [];
+    const cat = cats[loop.categoryIndex];
+    return [
+      `List *${brand}*'s *${cat}* products with pricing.\n` +
+        `Format: *Variant – Regular Price – Promo Price (if any)*, one per line (e.g. "500ml - 65 - 60").\n` +
+        `Or SKIP if you don't have this detail.`,
+    ];
   }
   return [""]; // unreachable
 }
@@ -559,8 +568,35 @@ function handleCompetitorLoop(session, message, upper, replies) {
       }
       session.answers.competitorPricing[brand].promo = result.value;
     }
-    loop.brandIndex += 1;
-    loop.stage = "categories";
+    loop.stage = "categoryPricing";
+    loop.categoryIndex = 0;
+    replies.push(...promptForCompetitorLoopOrContinue(session));
+    return replies;
+  }
+
+  if (loop.stage === "categoryPricing") {
+    const cats = session.answers.competitorCategories[brand] || [];
+    const cat = cats[loop.categoryIndex];
+    session.answers.competitorCategoryPricing = session.answers.competitorCategoryPricing || {};
+    session.answers.competitorCategoryPricing[brand] = session.answers.competitorCategoryPricing[brand] || {};
+
+    if (upper === "SKIP") {
+      session.answers.competitorCategoryPricing[brand][cat] = "";
+    } else {
+      const result = validators.validateComments(getRawText(message));
+      if (!result.ok) {
+        replies.push(result.error);
+        return replies;
+      }
+      session.answers.competitorCategoryPricing[brand][cat] = result.value;
+    }
+
+    loop.categoryIndex += 1;
+    if (loop.categoryIndex >= cats.length) {
+      loop.brandIndex += 1;
+      loop.stage = "categories";
+      loop.categoryIndex = 0;
+    }
     replies.push(...promptForCompetitorLoopOrContinue(session));
     return replies;
   }
