@@ -26,8 +26,11 @@
  *    the addresses listed in ALLOWED_TO.
  *  - Mail is sent from the Google account that owns this script. Consumer
  *    Gmail allows roughly 100 recipients a day, plenty for survey alerts.
- *  - If you change this file later, use Deploy > Manage deployments > Edit >
- *    New version, otherwise the live URL keeps running the old code.
+ *  - If you change this file later, use Deploy > Manage deployments > pencil
+ *    (Edit) > Version: New version > Deploy. The URL stays the same; without a
+ *    new version the live URL keeps running the old code.
+ *  - The bot sends both a plain-text body and an HTML version; this script
+ *    passes both to MailApp, which lets the mail program choose.
  */
 function doPost(e) {
   try {
@@ -52,12 +55,18 @@ function doPost(e) {
       }
     }
 
-    MailApp.sendEmail({
+    var mail = {
       to: recipients.join(","),
       subject: String(data.subject || "PRULife survey alert").slice(0, 200),
-      body: String(data.body || ""),
+      body: String(data.body || ""), // plain-text version, shown by mail programs that can't display HTML
       name: "PRULife Survey Bot",
-    });
+    };
+    // Formatted version. Optional: if the bot doesn't send one (older bot
+    // code) the email simply goes out as plain text, as before.
+    if (typeof data.html === "string" && data.html.length > 0 && data.html.length < 200000) {
+      mail.htmlBody = data.html;
+    }
+    MailApp.sendEmail(mail);
     return json_({ ok: true });
   } catch (err) {
     return json_({ ok: false, error: String(err) });

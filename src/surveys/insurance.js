@@ -577,6 +577,7 @@ const COLUMNS = [
   "submittedAtDate",
   "sessionId",
   "status",
+  "source",
   "revisionNumber",
   "revisionOf",
   "proposerWaId",

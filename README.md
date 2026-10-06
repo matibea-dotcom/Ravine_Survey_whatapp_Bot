@@ -280,3 +280,17 @@ with the client. Phase 2 will call the Prudential API for real-time quotes.
 - Completion alerts (`src/alerts.js`): email via the Apps Script relay in
   `apps-script/insurance_alert_webhook.gs`, plus a WhatsApp message. See
   `DELIVERY_NOTES.md` for setup.
+
+
+### Campaign source tags
+Campaign links pre-fill the first message as `PRULIFE-<tag>` (WA = WhatsApp
+Status, IG = Instagram, FB = Facebook, TT = TikTok, QR = QR code; any other
+12-character tag is stored as typed). `src/sourceTag.js` reads it, the engine
+keeps it on the session, and `src/insuranceSubmit.js` writes it to the
+`source` column. See `DELIVERY_NOTES.md` for the link table.
+
+### Funnel tracking
+`src/insuranceEvents.js` batches funnel events (STARTED, CONSENTED, DECLINED,
+INELIGIBLE, SUBMITTED - no personal data) into the `Insurance_Events` tab via
+`sheets.appendInsuranceEvents`. `apps-script/setup_campaign_funnel.gs` builds the
+"Campaign Funnel" summary tab from it. See `DELIVERY_NOTES.md`.

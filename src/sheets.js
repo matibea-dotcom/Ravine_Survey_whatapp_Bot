@@ -1050,7 +1050,26 @@ async function computeMtReport() {
   };
 }
 
+// ---- Insurance funnel events (starts / consent / completion, no personal data) ----
+const INSURANCE_EVENT_COLUMNS = ["eventAt", "sessionId", "source", "event", "referenceNumber"];
+
+/** Appends a batch of funnel events in ONE call. The header is re-read each time so a column you move in Sheets still lines up. */
+async function appendInsuranceEvents(events) {
+  if (!events || events.length === 0) return;
+  const tab = process.env.GOOGLE_SHEET_TAB_INSURANCE_EVENTS || "Insurance_Events";
+  const header = await ensureHeaderHasColumns(tab, INSURANCE_EVENT_COLUMNS);
+  const sheetsApi = await getClient();
+  await sheetsApi.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${tab}!A1`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: events.map((e) => header.map((col) => (e[col] === undefined || e[col] === null ? "" : e[col]))) },
+  });
+}
+
 module.exports = {
+  appendInsuranceEvents,
   readAllAgents,
   appendAgent,
   updateAgentRow,

@@ -4,6 +4,7 @@
 
 const sheets = require("./sheets");
 const alerts = require("./alerts");
+const insuranceEvents = require("./insuranceEvents");
 const insurance = require("./surveys/insurance");
 const { kes } = insurance.helpers;
 
@@ -50,7 +51,7 @@ async function finalizeInsuranceSubmit({ waId, session, replies, sessionStore })
     console.error("Insurance revision lookup failed (non-blocking):", err.message);
   }
 
-  const answers = { ...session.answers, ...derived.fields, revisionNumber, revisionOf };
+  const answers = { ...session.answers, ...derived.fields, revisionNumber, revisionOf, source: session.source || "Direct" };
   const submission = {
     referenceNumber,
     submittedAt: new Date().toISOString(),
@@ -73,6 +74,7 @@ async function finalizeInsuranceSubmit({ waId, session, replies, sessionStore })
 
   session.status = "submitted";
   session.pendingSubmit = false;
+  insuranceEvents.log(session, "SUBMITTED", { referenceNumber });
 
   // Alerts are best-effort and must never undo or delay the saved survey.
   alerts.sendInsuranceAlert(submission).catch((err) => console.error("Insurance alert error:", err.message));
@@ -93,11 +95,12 @@ async function finalizeInsuranceSubmit({ waId, session, replies, sessionStore })
  * alert) so the team can see demand they couldn't serve.
  */
 async function endInsuranceEarly({ waId, session, end, replies, sessionStore }) {
+  insuranceEvents.log(session, end.save ? "INELIGIBLE" : "DECLINED");
   if (end.save) {
     try {
       const referenceNumber = newReference();
       const derived = insurance.computeDerived(session.answers, { waId });
-      const answers = { ...session.answers, ...derived.fields, status: end.status || "INELIGIBLE" };
+      const answers = { ...session.answers, ...derived.fields, status: end.status || "INELIGIBLE", source: session.source || "Direct" };
       await sheets.appendSubmission({
         referenceNumber,
         submittedAt: new Date().toISOString(),

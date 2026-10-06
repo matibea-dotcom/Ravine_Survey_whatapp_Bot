@@ -19,6 +19,8 @@ const {
   getSurveyStepsForTrack,
 } = require("./surveys");
 const insuranceSubmit = require("./insuranceSubmit");
+const sourceTag = require("./sourceTag");
+const insuranceEvents = require("./insuranceEvents");
 // Ravine catalog lookup is MT-specific by design (this pricing-loop feature
 // only exists for the MT track's SURVEY_STEPS) — imported directly rather
 // than through the generic track registry.
@@ -788,6 +790,7 @@ function handleGlobalCommand(waId, agent, session, cmd, replies) {
     case "RESTART": {
       const fresh = sessionStore.newSession(waId);
       fresh.track = resolveTrackForAgent(agent);
+      if (session && session.source) fresh.source = session.source; // RESTART must not lose which channel they came from
       replies.push(
         getTrackModule(fresh.track)?.publicAccess
           ? `Starting over.\n\n${stepPrompt(currentStep(fresh), fresh.answers)}`
@@ -1359,7 +1362,7 @@ async function handleInboundMessage(waId, message) {
   // from then on, an open insurance session keeps them on the proposer path.
   const priorSession = sessionStore.get(waId);
   const inProposerSession = !!(priorSession && priorSession.track && getTrackModule(priorSession.track)?.publicAccess && isTrackActive(priorSession.track));
-  const proposerKeyword = !agent && isTrackActive("INSURANCE") && (upper === "PRULIFE" || upper === "INSURANCE");
+  const proposerKeyword = !agent && isTrackActive("INSURANCE") && (!!sourceTag.parseEntry(rawText) || upper === "INSURANCE");
   const publicOnly = isPublicOnlyMode();
   if (publicOnly || (!agent && (inProposerSession || proposerKeyword))) {
     agent = {
@@ -1438,6 +1441,28 @@ async function handleInboundMessage(waId, message) {
     return handleResetAgent(waId, session, replies);
   }
 
+  // --- Campaign entry (a link or QR tap pre-fills "PRULIFE" or "PRULIFE-IG"...).
+  // It must never be mistaken for an answer to the current question: someone
+  // tapping the link twice, or again mid-survey, would otherwise have
+  // "PRULIFE-IG" saved as their name. ---
+  const entry = agent.isProposer ? sourceTag.parseEntry(rawText) : null;
+  if (entry && session) {
+    const hasAnswers = Object.keys(session.answers).length > 0;
+    if (session.status === "active" && hasAnswers) {
+      replies.push("You're already partway through, so let's carry on.");
+      replies.push(...promptForCurrentOrSummary(session));
+      return replies;
+    }
+    if ((session.status === "paused" || session.status === "timed_out") && hasAnswers) {
+      if (replies.length === 0) {
+        replies.push("You have an unfinished survey. Type RESUME to continue where you left off, or RESTART to start again.");
+      }
+      return replies;
+    }
+  }
+  // Tapped the link again while still on the first (consent) question: start clean.
+  const entryRestart = !!(entry && session && session.status === "active" && Object.keys(session.answers).length === 0);
+
   // --- Global commands ---
   if (GLOBAL_COMMANDS.includes(upper)) {
     handleGlobalCommand(waId, agent, session, upper, replies);
@@ -1449,13 +1474,19 @@ async function handleInboundMessage(waId, message) {
   // after a finished/cancelled survey) begins the live survey.
   const proposerAutoStart =
     agent.isProposer && (!session || session.status === "cancelled" || session.status === "submitted");
-  if (upper === "START" || proposerAutoStart) {
+  if (upper === "START" || proposerAutoStart || entryRestart) {
     if (session && session.status === "active" && Object.keys(session.answers).length > 0) {
       replies.push("You already have a survey in progress. Type RESUME to continue, SUMMARY to review it, or CANCEL to discard it.");
       return replies;
     }
     session = sessionStore.newSession(waId);
     session.track = resolveTrackForAgent(agent);
+    // Which campaign channel brought this person (read from their first message)
+    if (agent.isProposer) {
+      session.source = sourceTag.parseSource(rawText);
+      // Funnel: count a start (but not the clean restart after a double-tap on the first question)
+      if (!entryRestart && getTrackModule(session.track)?.publicAccess) insuranceEvents.log(session, "STARTED");
+    }
 
     if (getTrackModule(session.track)?.publicAccess) {
       replies.push(stepPrompt(currentStep(session), session.answers));
@@ -1714,6 +1745,7 @@ async function handleInboundMessage(waId, message) {
   session.answers[step.key] = result.value;
   session.retryCount = 0;
   if (step.onAnswer) step.onAnswer(result.value, session.answers);
+  if (step.key === "consent" && result.value !== "No" && getTrackModule(session.track)?.publicAccess) insuranceEvents.log(session, "CONSENTED");
 
   // A step can end the whole survey (declined consent, ineligible age).
   const endNow = step.endIf ? step.endIf(result.value, session.answers) : null;

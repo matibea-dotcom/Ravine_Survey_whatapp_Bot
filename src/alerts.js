@@ -87,6 +87,7 @@ function buildHtml({ sub, a, flags, tags, joint, revision }) {
     row("Name", a.fullName),
     row("WhatsApp", `+${a.proposerWaId}`),
     row("Email", a.email || "not given"),
+    row("Lead source", a.source || "Direct"),
     row("Date of birth", `${formatDob(a.dateOfBirth)} (age ${a.ageAtSubmission})`),
     row("Gender", a.gender),
     row("Smoker", a.smoker),
@@ -201,6 +202,7 @@ function buildAlert(sub) {
     `Name: ${a.fullName}`,
     `WhatsApp: +${a.proposerWaId}`,
     `Email: ${a.email || "not given"}`,
+    `Lead source: ${a.source || "Direct"}`,
     `Date of birth: ${formatDob(a.dateOfBirth)} (age ${a.ageAtSubmission})`,
     `Gender: ${a.gender}`,
     `Smoker: ${a.smoker}`,
@@ -234,6 +236,7 @@ function buildAlert(sub) {
     `📩 New PRULife survey ${sub.referenceNumber}${revision}\n` +
     `${a.fullName}, +${a.proposerWaId}\n` +
     `${a.plan}, ${a.coverType}, ${coverLine}\n` +
+    `Source: ${a.source || "Direct"}\n` +
     (tags.length ? `⚠️ ${tags.join(", ")}\n` : "") +
     `Details sent to email / see Insurance_Submissions sheet.`;
 
