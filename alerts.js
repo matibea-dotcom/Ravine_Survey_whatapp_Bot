@@ -48,6 +48,128 @@ function flagTags(flags) {
   return tags;
 }
 
+
+// ---------------------------------------------------------------- HTML email
+// A formatted version of the alert (tables + inline styles only, because mail
+// programs such as Outlook ignore modern CSS). The plain-text version is still
+// sent alongside it as a fallback. EVERY value that came from the client or
+// the survey goes through esc(), so nothing a person types (a name, a note) can
+// inject markup or break the layout.
+const BRAND = "#c8102e";
+
+function esc(v) {
+  return String(v === undefined || v === null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// ISO timestamp -> "2026-10-06 10:44 (Nairobi)"
+function nairobiStamp(iso) {
+  const d = new Date(new Date(iso).getTime() + 3 * 3600 * 1000);
+  if (isNaN(d)) return String(iso || "");
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())} (Nairobi)`;
+}
+
+function buildHtml({ sub, a, flags, tags, joint, revision }) {
+  const row = (label, value) =>
+    `<tr><td width="190" style="width:190px;padding:7px 12px 7px 0;color:#667085;font-size:13px;vertical-align:top;border-bottom:1px solid #eef0f3;">${esc(label)}</td>` +
+    `<td style="padding:7px 0;color:#101828;font-size:14px;font-weight:600;vertical-align:top;border-bottom:1px solid #eef0f3;">${esc(value)}</td></tr>`;
+
+  const section = (title, rowsHtml) =>
+    `<tr><td style="padding:20px 28px 6px 28px;"><div style="font-size:12px;letter-spacing:1px;text-transform:uppercase;color:${BRAND};font-weight:700;">${esc(title)}</div></td></tr>` +
+    `<tr><td style="padding:0 28px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;table-layout:fixed;">${rowsHtml}</table></td></tr>`;
+
+  const proposer = [
+    row("Name", a.fullName),
+    row("WhatsApp", `+${a.proposerWaId}`),
+    row("Email", a.email || "not given"),
+    row("Date of birth", `${formatDob(a.dateOfBirth)} (age ${a.ageAtSubmission})`),
+    row("Gender", a.gender),
+    row("Smoker", a.smoker),
+  ].join("");
+
+  const spouse = joint
+    ? [
+        row("Date of birth", `${formatDob(a.spouseDob)} (age ${a.spouseAge})`),
+        row("Gender", a.spouseGender),
+        row("Smoker", a.spouseSmoker),
+      ].join("")
+    : "";
+
+  const coverRows = [
+    row("Plan", a.plan + (a.plan === "Plan B" ? " (critical illness built in)" : "")),
+    row("Cover type", a.coverType),
+    row("Premium term", a.premiumTerm),
+    row("Quote based on", a.calcMode === "Premium" ? "Premium" : "Cover amount"),
+    row("Payment frequency", a.paymentFrequency),
+  ];
+  if (a.modalPremium !== undefined) coverRows.push(row("Premium (incl. riders)", `${kes(a.modalPremium)} ${String(a.paymentFrequency).toLowerCase()}`));
+  if (a.sumAssured !== undefined) coverRows.push(row("Sum assured", kes(a.sumAssured)));
+  if (a.ciRider) coverRows.push(row("Critical illness rider", a.ciRider + (a.ciAmount ? ` - ${kes(a.ciAmount)}` : "")));
+  if (a.accidentRider) coverRows.push(row("Accident rider", a.accidentRider + (a.accidentAmount ? ` - ${kes(a.accidentAmount)}` : "")));
+  if (a.estTaxRelief !== "" && a.estTaxRelief !== undefined) coverRows.push(row("Indicative annual tax relief", kes(a.estTaxRelief)));
+
+  const checks = [row("Medical exam", a.medicalRequired), row("Special clearance", a.specialClearance)].join("");
+
+  const chips = tags
+    .map(
+      (t) =>
+        `<span style="display:inline-block;background:${BRAND};color:#ffffff;padding:3px 10px;margin:0 6px 6px 0;font-size:12px;font-weight:700;">${esc(t)}</span>`
+    )
+    .join("");
+
+  const flagItem = (f) => {
+    const i = f.indexOf(":");
+    const head = i > 0 ? f.slice(0, i) : f;
+    const rest = i > 0 ? f.slice(i + 1).trim() : "";
+    const hot = /^(SPECIAL_CLEARANCE|MEDICAL_REQUIRED|MEDICAL_CHECK_RIDERS|AGE_BOUNDARY)/.test(head);
+    return (
+      `<tr><td style="padding:5px 0;font-size:13px;color:#344054;line-height:18px;">` +
+      `<span style="font-weight:700;color:${hot ? BRAND : "#475467"};">${esc(head)}</span>${rest ? " &ndash; " + esc(rest) : ""}</td></tr>`
+    );
+  };
+  const flagsHtml = flags.length ? section("Flags", flags.map(flagItem).join("")) : "";
+
+  const notesHtml = a.notes
+    ? `<tr><td style="padding:20px 28px 0 28px;"><div style="font-size:12px;letter-spacing:1px;text-transform:uppercase;color:${BRAND};font-weight:700;">Notes from client</div>` +
+      `<div style="margin-top:6px;padding:10px 12px;background:#f9fafb;border:1px solid #eaecf0;font-size:14px;color:#101828;white-space:pre-wrap;">${esc(a.notes)}</div></td></tr>`
+    : "";
+
+  const revisionHtml = revision
+    ? `<tr><td style="padding:12px 28px 0 28px;"><div style="background:#fffaeb;border:1px solid #fedf89;padding:10px 12px;font-size:13px;color:#93370d;"><b>Revised submission</b> &ndash; this replaces an earlier request from the same number (${esc(a.revisionOf)}). Use these details.</div></td></tr>`
+    : "";
+
+  const waDigits = String(a.proposerWaId || "").replace(/\D/g, "");
+  const button = waDigits
+    ? `<tr><td style="padding:24px 28px 8px 28px;"><a href="https://wa.me/${waDigits}" style="display:inline-block;background:#1a9d54;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:11px 20px;">Reply to client on WhatsApp</a></td></tr>`
+    : "";
+
+  return (
+    `<!DOCTYPE html><html><head><meta charset="utf-8"></head>` +
+    `<body style="margin:0;padding:0;background:#f2f4f7;font-family:Segoe UI,Arial,Helvetica,sans-serif;">` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f4f7;"><tr><td align="center" style="padding:20px 10px;">` +
+    `<table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:640px;max-width:100%;background:#ffffff;border:1px solid #e4e7ec;">` +
+    `<tr><td style="background:${BRAND};padding:18px 28px;"><div style="color:#ffffff;font-size:12px;letter-spacing:1px;text-transform:uppercase;">New PRULife survey</div>` +
+    `<div style="color:#ffffff;font-size:22px;font-weight:700;margin-top:4px;">${esc(a.fullName)}</div>` +
+    `<div style="color:#ffffff;font-size:13px;margin-top:4px;">Ref ${esc(sub.referenceNumber)} &middot; ${esc(nairobiStamp(sub.submittedAt))}</div></td></tr>` +
+    (chips ? `<tr><td style="padding:16px 28px 4px 28px;">${chips}</td></tr>` : "") +
+    revisionHtml +
+    section("Proposer", proposer) +
+    (joint ? section("Spouse (joint life)", spouse) : "") +
+    section("Cover requested", coverRows.join("")) +
+    section("Checks", checks) +
+    flagsHtml +
+    notesHtml +
+    button +
+    `<tr><td style="padding:16px 28px 24px 28px;font-size:12px;color:#98a2b3;">Full record: Insurance_Submissions tab in the survey Google Sheet.</td></tr>` +
+    `</table></td></tr></table></body></html>`
+  );
+}
+
 function buildAlert(sub) {
   const a = sub.answers;
   const flags = sub.flags || [];
@@ -115,7 +237,9 @@ function buildAlert(sub) {
     (tags.length ? `⚠️ ${tags.join(", ")}\n` : "") +
     `Details sent to email / see Insurance_Submissions sheet.`;
 
-  return { subject, text, waText, tags, templateParams: [sub.referenceNumber, a.fullName, `${a.plan}, ${coverLine}`, tags.length ? tags.join(", ") : "None"] };
+  const html = buildHtml({ sub, a, flags, tags, joint, revision: Number(a.revisionNumber) > 1 });
+
+  return { subject, text, html, waText, tags, templateParams: [sub.referenceNumber, a.fullName, `${a.plan}, ${coverLine}`, tags.length ? tags.join(", ") : "None"] };
 }
 
 async function sendEmail(alert) {
@@ -130,7 +254,7 @@ async function sendEmail(alert) {
   }
   const res = await axios.post(
     url,
-    { secret: process.env.ALERT_WEBHOOK_SECRET || "", to, subject: alert.subject, body: alert.text },
+    { secret: process.env.ALERT_WEBHOOK_SECRET || "", to, subject: alert.subject, body: alert.text, html: alert.html },
     { timeout: 15000, headers: { "Content-Type": "application/json" }, maxRedirects: 5 }
   );
   // Success means the relay explicitly answered {"ok":true}. Anything else —
@@ -221,4 +345,4 @@ function logAlertConfig() {
 }
 logAlertConfig();
 
-module.exports = { sendInsuranceAlert, buildAlert, normalizeKenyanNumber };
+module.exports = { sendInsuranceAlert, buildAlert, normalizeKenyanNumber, esc };
